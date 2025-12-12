@@ -1175,7 +1175,7 @@ if train_button:
     st.rerun()
 
 # Display training charts
-if 'training_history' in st.session_state and st.session_state.training_history:
+'''if 'training_history' in st.session_state and st.session_state.training_history:
     history = st.session_state.training_history
     
     if isinstance(history, dict) and 'episode' in history and len(history['episode']) > 0:
@@ -1204,7 +1204,7 @@ if 'training_history' in st.session_state and st.session_state.training_history:
         st.write("#### Q-Network Growth")
         if 'q_values' in df.columns:
             chart_data = df[['episode', 'q_values']].set_index('episode')
-            st.line_chart(chart_data)
+            st.line_chart(chart_data)'''
 
 # AI Solving with Manual Controls
 if 'agent' in st.session_state and st.session_state.agent is not None and len(getattr(st.session_state.agent, 'policy_table', {})) > 10:
