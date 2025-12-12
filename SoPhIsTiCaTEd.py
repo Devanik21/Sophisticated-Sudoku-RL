@@ -627,8 +627,10 @@ def visualize_sudoku(board, title="Sudoku", highlight_cells=None):
 def create_agent_zip(agent, config):
     """Package agent into zip"""
     # Convert defaultdicts to regular dicts for JSON serialization
+    # The policy table has tuple keys for states and moves, which must be converted to strings for JSON.
     agent_state = {
-        "policy_table": {str(k): dict(v) for k, v in list(agent.policy_table.items())[:1000]},
+        "policy_table": {str(state_key): {str(move_key): move_val for move_key, move_val in move_dict.items()} 
+                         for state_key, move_dict in list(agent.policy_table.items())[:1000]},
         "value_table": {str(k): v for k, v in list(agent.value_table.items())[:1000]},
         "epsilon": agent.epsilon,
         "puzzles_solved": agent.puzzles_solved,
