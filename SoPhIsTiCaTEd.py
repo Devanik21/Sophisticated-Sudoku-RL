@@ -946,7 +946,9 @@ if 'training_history' in st.session_state and st.session_state.training_history:
             st.line_chart(chart_data)
 
 # AI Solving with Manual Controls
-if 'agent' in st.session_state and st.session_state.agent is not None and len(getattr(st.session_state.agent, 'policy_table', {})) > 10:
+# AI Solving with Manual Controls
+# UPDATED: Removed the 'len > 10' check so the section is always visible for you
+if 'agent' in st.session_state and st.session_state.agent is not None:
     st.markdown("---")
     st.subheader("🎬 Watch AI Solve Sudoku (Step-by-Step)")
     
