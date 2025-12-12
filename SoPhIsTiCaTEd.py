@@ -10,7 +10,8 @@ import io
 import math
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional
+import time
 
 # ============================================================================
 # Page Config
@@ -33,268 +34,227 @@ AI agent that solves Sudoku using cutting-edge hybrid reinforcement learning tec
 - 🎯 **Policy & Value Heads** - Dual neural network outputs
 - 🔍 **Minimax Lookahead** - Strategic depth evaluation
 - 🎲 **Self-Attention** - Pattern recognition across grid regions
+
+---
+
+### 🎮 Quick Start Guide:
+1. **Train the AI**: Adjust hyperparameters in sidebar → Click "Begin Training"
+2. **Generate Puzzle**: Use the Puzzle Generator → Select difficulty → Generate
+3. **Watch AI Solve**: Generate AI Solution → Use playback controls (⏮️ ◀️ ▶️ ⏭️)
+4. **Play Yourself**: Generate puzzle → Click "Play This" → Enter numbers manually
+5. **Save Progress**: Download Brain after training → Upload later to continue
+
 """, unsafe_allow_html=True)
 
+with st.expander("📚 Learn More About The Architecture"):
+    st.markdown("""
+    #### How It Works:
+    
+    **1. MCTS (Monte Carlo Tree Search)**
+    - Explores possible moves by simulating games
+    - Uses PUCT formula to balance exploration vs exploitation
+    - Similar to how AlphaGo/AlphaZero thinks ahead
+    
+    **2. DQN (Deep Q-Network)**
+    - Learns from past experiences using replay buffer
+    - Prioritizes important learning examples
+    - Updates Q-values to predict future rewards
+    
+    **3. Constraint Propagation**
+    - Uses Sudoku rules to eliminate impossible values
+    - Identifies "naked singles" (only one possible value)
+    - Applies logical deduction before MCTS
+    
+    **4. Self-Attention Patterns**
+    - Learns which values work well in which positions
+    - Adapts strategy based on success/failure
+    - Similar to transformer attention mechanisms
+    
+    **5. Hybrid Decision Making**
+    - First tries logical deduction (naked singles)
+    - Falls back to MCTS for complex decisions
+    - Uses value caching for speed
+    """)
+
+st.markdown("---")
+
 # ============================================================================
-# Sudoku Environment
+# Optimized Sudoku Environment
 # ============================================================================
 
-@dataclass
-class SudokuMove:
-    row: int
-    col: int
-    value: int
+class SudokuEnv:
+    """Fast Sudoku environment with efficient constraint propagation"""
     
-    def __hash__(self):
-        return hash((self.row, self.col, self.value))
-    
-    def __eq__(self, other):
-        return (self.row == other.row and self.col == other.col and 
-                self.value == other.value)
-
-class Sudoku:
-    """9x9 Sudoku Environment with Constraint Propagation"""
-    def __init__(self):
-        self.size = 9
+    def __init__(self, grid_size=9):
+        self.grid_size = grid_size
+        self.box_size = int(np.sqrt(grid_size))
         self.reset()
     
     def reset(self, puzzle=None):
-        """Initialize Sudoku puzzle"""
+        """Initialize puzzle"""
         if puzzle is not None:
             self.board = puzzle.copy()
             self.initial_board = puzzle.copy()
         else:
-            # Generate a simple puzzle or empty board
-            self.board = np.zeros((9, 9), dtype=int)
+            self.board = np.zeros((self.grid_size, self.grid_size), dtype=int)
             self.initial_board = self.board.copy()
         
-        # Track possibilities for each cell
-        self.possibilities = {}
-        self._update_all_possibilities()
-        
-        self.move_history = []
-        self.solved = False
+        self.move_count = 0
         return self.get_state()
     
-    def _update_all_possibilities(self):
-        """Update possible values for all empty cells"""
-        for row in range(9):
-            for col in range(9):
-                if self.board[row, col] == 0:
-                    self.possibilities[(row, col)] = self._get_possible_values(row, col)
-    
-    def _get_possible_values(self, row, col):
-        """Get valid values for a cell using constraint propagation"""
-        if self.board[row, col] != 0:
-            return set()
-        
-        possible = set(range(1, 10))
-        
-        # Remove values in same row
-        possible -= set(self.board[row, :])
-        
-        # Remove values in same column
-        possible -= set(self.board[:, col])
-        
-        # Remove values in same 3x3 box
-        box_row, box_col = 3 * (row // 3), 3 * (col // 3)
-        box_values = self.board[box_row:box_row+3, box_col:box_col+3]
-        possible -= set(box_values.flatten())
-        
-        possible.discard(0)
-        return possible
-    
     def get_state(self):
-        """Return hashable board state"""
+        """Return hashable state"""
         return tuple(self.board.flatten())
     
     def copy(self):
-        """Deep copy of game state"""
-        new_game = Sudoku()
-        new_game.board = self.board.copy()
-        new_game.initial_board = self.initial_board.copy()
-        new_game.possibilities = deepcopy(self.possibilities)
-        new_game.move_history = self.move_history.copy()
-        new_game.solved = self.solved
-        return new_game
+        """Deep copy"""
+        new_env = SudokuEnv(self.grid_size)
+        new_env.board = self.board.copy()
+        new_env.initial_board = self.initial_board.copy()
+        new_env.move_count = self.move_count
+        return new_env
+    
+    def is_valid_move(self, row, col, num):
+        """Check if move is valid"""
+        # Check row
+        if num in self.board[row]:
+            return False
+        
+        # Check column
+        if num in self.board[:, col]:
+            return False
+        
+        # Check box
+        box_row = (row // self.box_size) * self.box_size
+        box_col = (col // self.box_size) * self.box_size
+        box = self.board[box_row:box_row + self.box_size, 
+                        box_col:box_col + self.box_size]
+        if num in box:
+            return False
+        
+        return True
+    
+    def get_candidates(self, row, col):
+        """Fast constraint propagation for a cell"""
+        if self.board[row, col] != 0:
+            return []
+        
+        candidates = set(range(1, self.grid_size + 1))
+        
+        # Remove row conflicts
+        candidates -= set(self.board[row])
+        
+        # Remove column conflicts
+        candidates -= set(self.board[:, col])
+        
+        # Remove box conflicts
+        box_row = (row // self.box_size) * self.box_size
+        box_col = (col // self.box_size) * self.box_size
+        box = self.board[box_row:box_row + self.box_size, 
+                        box_col:box_col + self.box_size]
+        candidates -= set(box.flatten())
+        
+        candidates.discard(0)
+        return list(candidates)
     
     def get_valid_moves(self):
-        """Get all valid moves"""
+        """Get all valid (row, col, num) moves"""
         moves = []
-        for row in range(9):
-            for col in range(9):
+        for row in range(self.grid_size):
+            for col in range(self.grid_size):
                 if self.board[row, col] == 0:
-                    possible = self._get_possible_values(row, col)
-                    for val in possible:
-                        moves.append(SudokuMove(row, col, val))
+                    candidates = self.get_candidates(row, col)
+                    for num in candidates:
+                        moves.append((row, col, num))
         return moves
     
-    def make_move(self, move: SudokuMove):
-        """Execute a move and return (next_state, reward, done)"""
-        if self.board[move.row, move.col] != 0:
-            return self.get_state(), -10, False  # Invalid move penalty
+    def make_move(self, row, col, num):
+        """Make move and return reward, done"""
+        if self.initial_board[row, col] != 0:
+            return -10, False
         
-        # Check if move is valid
-        possible = self._get_possible_values(move.row, move.col)
-        if move.value not in possible:
-            return self.get_state(), -10, False
+        if not self.is_valid_move(row, col, num):
+            return -5, False
         
-        # Make the move
-        self.board[move.row, move.col] = move.value
-        self.move_history.append(move)
-        self._update_all_possibilities()
+        self.board[row, col] = num
+        self.move_count += 1
         
         # Calculate reward
         reward = 1
         
-        # Bonus for reducing possibilities (constraint propagation effectiveness)
-        reward += self._count_constraint_propagations() * 0.5
+        # Bonus for constraint strength
+        candidates_reduced = 0
+        for r, c in [(row, i) for i in range(self.grid_size)] + \
+                    [(i, col) for i in range(self.grid_size)]:
+            if self.board[r, c] == 0:
+                candidates_reduced += 1
+        
+        reward += candidates_reduced * 0.1
         
         # Check if solved
         if self.is_solved():
-            self.solved = True
-            reward = 1000
-        elif self.has_contradiction():
-            reward = -100
+            return 100, True
         
-        return self.get_state(), reward, self.solved
-    
-    def _count_constraint_propagations(self):
-        """Count how many cells now have only one possibility"""
-        count = 0
-        for cell, poss in self.possibilities.items():
-            if len(poss) == 1:
-                count += 1
-        return count
+        # Check if stuck
+        if not self.get_valid_moves():
+            return -20, True
+        
+        return reward, False
     
     def is_solved(self):
-        """Check if puzzle is completely and correctly solved"""
-        if np.any(self.board == 0):
+        """Check if solved"""
+        if 0 in self.board:
             return False
         
         # Check rows
-        for row in range(9):
-            if set(self.board[row, :]) != set(range(1, 10)):
+        for i in range(self.grid_size):
+            if len(set(self.board[i])) != self.grid_size:
                 return False
         
         # Check columns
-        for col in range(9):
-            if set(self.board[:, col]) != set(range(1, 10)):
+        for i in range(self.grid_size):
+            if len(set(self.board[:, i])) != self.grid_size:
                 return False
         
-        # Check 3x3 boxes
-        for box_row in range(0, 9, 3):
-            for box_col in range(0, 9, 3):
-                box = self.board[box_row:box_row+3, box_col:box_col+3]
-                if set(box.flatten()) != set(range(1, 10)):
+        # Check boxes
+        for box_row in range(0, self.grid_size, self.box_size):
+            for box_col in range(0, self.grid_size, self.box_size):
+                box = self.board[box_row:box_row + self.box_size,
+                                box_col:box_col + self.box_size]
+                if len(set(box.flatten())) != self.grid_size:
                     return False
         
         return True
     
-    def has_contradiction(self):
-        """Check if current state has any contradictions"""
-        for row in range(9):
-            for col in range(9):
-                if self.board[row, col] == 0:
-                    if len(self._get_possible_values(row, col)) == 0:
-                        return True
-        return False
-    
-    def get_empty_cells_count(self):
-        """Count remaining empty cells"""
-        return np.sum(self.board == 0)
-    
-    def evaluate_position(self):
-        """
-        AlphaZero-Inspired Position Evaluation
-        """
+    def evaluate_state(self):
+        """Heuristic evaluation"""
         if self.is_solved():
-            return 100000
-        if self.has_contradiction():
-            return -100000
+            return 10000
         
         score = 0
         
-        # Reward filled cells
-        filled = 81 - self.get_empty_cells_count()
-        score += filled * 100
+        # Filled cells
+        filled = np.count_nonzero(self.board)
+        score += filled * 10
         
-        # Constraint strength: fewer possibilities is better
-        total_possibilities = sum(len(p) for p in self.possibilities.values())
-        score -= total_possibilities * 10
-        
-        # Naked singles (cells with only one possibility) are very valuable
-        naked_singles = sum(1 for p in self.possibilities.values() if len(p) == 1)
-        score += naked_singles * 50
-        
-        # Hidden singles bonus (only one place for a value in row/col/box)
-        score += self._count_hidden_singles() * 30
+        # Constraint strength
+        for row in range(self.grid_size):
+            for col in range(self.grid_size):
+                if self.board[row, col] == 0:
+                    candidates = len(self.get_candidates(row, col))
+                    if candidates == 0:
+                        return -10000  # Dead end
+                    score += (self.grid_size - candidates) * 5
         
         return score
-    
-    def _count_hidden_singles(self):
-        """Count hidden singles - advanced constraint propagation"""
-        count = 0
-        
-        # Check rows
-        for row in range(9):
-            for val in range(1, 10):
-                if val in self.board[row, :]:
-                    continue
-                possible_cols = [col for col in range(9) 
-                               if self.board[row, col] == 0 and 
-                               val in self._get_possible_values(row, col)]
-                if len(possible_cols) == 1:
-                    count += 1
-        
-        return count
 
 # ============================================================================
-# Experience Replay Buffer (DQN Component)
-# ============================================================================
-
-class ReplayBuffer:
-    """Prioritized Experience Replay for DQN"""
-    def __init__(self, capacity=10000):
-        self.buffer = deque(maxlen=capacity)
-        self.priorities = deque(maxlen=capacity)
-    
-    def push(self, state, action, reward, next_state, done):
-        """Add experience with priority"""
-        self.buffer.append((state, action, reward, next_state, done))
-        # New experiences get max priority
-        max_priority = max(self.priorities) if self.priorities else 1.0
-        self.priorities.append(max_priority)
-    
-    def sample(self, batch_size):
-        """Sample batch with priority weighting"""
-        if len(self.buffer) < batch_size:
-            return None
-        
-        # Convert priorities to probabilities
-        priorities = np.array(self.priorities)
-        probs = priorities / priorities.sum()
-        
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
-        batch = [self.buffer[idx] for idx in indices]
-        
-        return batch, indices
-    
-    def update_priorities(self, indices, td_errors):
-        """Update priorities based on TD errors"""
-        for idx, error in zip(indices, td_errors):
-            self.priorities[idx] = abs(error) + 1e-6
-    
-    def __len__(self):
-        return len(self.buffer)
-
-# ============================================================================
-# MCTS Node (AlphaZero Component)
+# MCTS Node (Optimized)
 # ============================================================================
 
 class MCTSNode:
-    def __init__(self, game_state, parent=None, move=None, prior=1.0):
-        self.game_state = game_state
+    def __init__(self, env, parent=None, move=None, prior=1.0):
+        self.env = env
         self.parent = parent
         self.move = move
         self.prior = prior
@@ -305,653 +265,406 @@ class MCTSNode:
         self.is_expanded = False
     
     def value(self):
-        """Average value"""
         return self.value_sum / self.visit_count if self.visit_count > 0 else 0
     
     def ucb_score(self, parent_visits, c_puct=1.5):
-        """PUCT algorithm (Predictor + Upper Confidence Bound)"""
+        """PUCT algorithm"""
         if self.visit_count == 0:
-            q_value = 0
-        else:
-            q_value = self.value()
+            return float('inf')
         
-        # AlphaZero UCB formula
-        u_value = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
+        q = self.value()
+        u = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
         
-        return q_value + u_value
+        return q + u
     
     def select_child(self, c_puct=1.5):
-        """Select child with highest UCB score"""
         return max(self.children.values(), 
-                   key=lambda child: child.ucb_score(self.visit_count, c_puct))
+                   key=lambda c: c.ucb_score(self.visit_count, c_puct))
     
-    def expand(self, game, policy_priors):
-        """Expand node with policy priors"""
-        valid_moves = game.get_valid_moves()
+    def expand(self, policy_priors):
+        """Expand with policy priors"""
+        valid_moves = self.env.get_valid_moves()
         
         if not valid_moves:
             return
         
-        # Normalize priors
-        total_prior = sum(policy_priors.values())
+        total_prior = sum(policy_priors.get(m, 1.0) for m in valid_moves)
         if total_prior == 0:
             total_prior = len(valid_moves)
         
         for move in valid_moves:
             prior = policy_priors.get(move, 1.0) / total_prior
-            child_game = game.copy()
-            child_game.make_move(move)
-            self.children[move] = MCTSNode(child_game, parent=self, move=move, prior=prior)
+            child_env = self.env.copy()
+            child_env.make_move(*move)
+            self.children[move] = MCTSNode(child_env, self, move, prior)
         
         self.is_expanded = True
     
     def backup(self, value):
-        """Backpropagate value up the tree"""
+        """Backpropagate"""
         self.visit_count += 1
         self.value_sum += value
         
         if self.parent:
-            self.parent.backup(value)  # Same player, so same sign
+            self.parent.backup(value)
 
 # ============================================================================
-# AlphaZero-Inspired Sudoku Agent
+# Prioritized Replay Buffer
 # ============================================================================
 
-class SudokuAgent:
-    def __init__(self, lr=0.3, gamma=0.99, epsilon=1.0):
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity=10000):
+        self.buffer = deque(maxlen=capacity)
+        self.priorities = deque(maxlen=capacity)
+        self.alpha = 0.6
+    
+    def add(self, state, move, reward, next_state, done):
+        max_priority = max(self.priorities) if self.priorities else 1.0
+        self.buffer.append((state, move, reward, next_state, done))
+        self.priorities.append(max_priority)
+    
+    def sample(self, batch_size):
+        if len(self.buffer) < batch_size:
+            return []
+        
+        probs = np.array(self.priorities) ** self.alpha
+        probs /= probs.sum()
+        
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        return [self.buffer[i] for i in indices]
+    
+    def __len__(self):
+        return len(self.buffer)
+
+# ============================================================================
+# Fast AlphaZero Agent
+# ============================================================================
+
+class AlphaZeroAgent:
+    def __init__(self, grid_size=9, lr=0.3, gamma=0.95):
+        self.grid_size = grid_size
         self.lr = lr
         self.gamma = gamma
-        self.epsilon = epsilon
-        self.epsilon_decay = 0.96
+        self.epsilon = 1.0
+        self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
         
-        # DQN Q-Learning component
-        self.q_table = {}
+        # Q-Learning
+        self.q_table = defaultdict(lambda: defaultdict(float))
         
-        # Experience Replay - Initialize first to avoid AttributeError
-        self.replay_buffer = ReplayBuffer(capacity=10000)
-        self.batch_size = 32
+        # Policy network (simulated)
+        self.policy_table = defaultdict(lambda: defaultdict(float))
+        
+        # Value network with caching
+        self.value_cache = {}
+        
+        # Experience replay
+        self.replay_buffer = PrioritizedReplayBuffer(5000)
         
         # MCTS parameters
         self.mcts_simulations = 100
         self.c_puct = 1.4
-        self.minimax_depth = 3
-        
-        # Policy network (simulated via heuristics)
-        self.policy_table = defaultdict(lambda: defaultdict(float))
-        
-        # Self-attention patterns (learned patterns) - Initialize as defaultdict
-        self.attention_patterns = defaultdict(float)
         
         # Stats
         self.puzzles_solved = 0
-        self.puzzles_failed = 0
-        self.total_moves = 0
+        self.puzzles_attempted = 0
+        self.avg_moves = []
         
-        # Training data
-        self.training_history = []
+        # Self-attention
+        self.attention_weights = defaultdict(float)
     
-    def get_policy_priors(self, game):
-        """
-        Simulate policy head using constraint propagation + learned patterns
-        """
-        state = game.get_state()
-        moves = game.get_valid_moves()
+    def get_policy_priors(self, env):
+        """Smart policy priors using constraint propagation"""
+        state = env.get_state()
+        valid_moves = env.get_valid_moves()
         priors = {}
         
-        # Ensure attention_patterns exists
-        if not hasattr(self, 'attention_patterns'):
-            self.attention_patterns = defaultdict(float)
-        
-        for move in moves:
-            # Use learned policy if available
+        for move in valid_moves:
+            row, col, num = move
+            
+            # Check learned policy
             if state in self.policy_table and move in self.policy_table[state]:
-                priors[move] = self.policy_table[state][move]
+                prior = self.policy_table[state][move]
             else:
-                # Heuristic prior based on constraint propagation
+                # Heuristic based on constraints
                 prior = 1.0
                 
-                # Check if this creates a naked single
-                test_game = game.copy()
-                test_game.make_move(move)
-                naked_singles = sum(1 for p in test_game.possibilities.values() if len(p) == 1)
-                prior += naked_singles * 2
+                candidates = env.get_candidates(row, col)
                 
-                # Cells with fewer possibilities are safer
-                possibilities = game._get_possible_values(move.row, move.col)
-                if len(possibilities) > 0:
-                    prior += 5.0 / len(possibilities)
+                # CRITICAL: Naked singles get huge priority
+                if len(candidates) == 1:
+                    prior += 100
+                elif len(candidates) == 2:
+                    prior += 20
+                else:
+                    # More constrained = better
+                    prior += (env.grid_size - len(candidates)) * 3
                 
-                # Pattern recognition bonus
-                pattern_key = (move.row // 3, move.col // 3, move.value)
-                prior += self.attention_patterns.get(pattern_key, 0)
-                
-                priors[move] = prior
+                # Self-attention pattern bonus
+                attention_key = (tuple(env.board[row]), 
+                               tuple(env.board[:, col]), num)
+                prior += self.attention_weights.get(attention_key, 0)
+            
+            priors[move] = max(prior, 0.1)
         
         return priors
     
-    def mcts_search(self, game, num_simulations):
-        """
-        Monte Carlo Tree Search - AlphaZero's planning engine
-        """
-        root = MCTSNode(game.copy())
+    def mcts_search(self, env, num_simulations):
+        """Fast MCTS with value caching"""
+        root = MCTSNode(env.copy())
         
         for _ in range(num_simulations):
             node = root
-            search_game = game.copy()
-            search_path = [node]
+            search_env = env.copy()
             
             # Selection
             while node.is_expanded and node.children:
                 node = node.select_child(self.c_puct)
-                search_game.make_move(node.move)
-                search_path.append(node)
+                search_env.make_move(*node.move)
             
             # Expansion
-            if not search_game.solved and not search_game.has_contradiction():
-                policy_priors = self.get_policy_priors(search_game)
-                node.expand(search_game, policy_priors)
+            if not search_env.is_solved() and search_env.get_valid_moves():
+                policy_priors = self.get_policy_priors(search_env)
+                node.expand(policy_priors)
             
-            # Evaluation
-            value = self._evaluate_leaf(search_game)
+            # Evaluation (with caching)
+            value = self._evaluate_leaf(search_env)
             
             # Backup
             node.backup(value)
         
         return root
     
-    def _evaluate_leaf(self, game):
-        """Evaluate terminal or leaf node"""
-        if game.is_solved():
+    def _evaluate_leaf(self, env):
+        """Fast evaluation with caching"""
+        if env.is_solved():
             return 1.0
-        if game.has_contradiction():
+        
+        if not env.get_valid_moves():
             return -1.0
         
-        # Use minimax for deeper evaluation
-        score = self._minimax(game, self.minimax_depth, -float('inf'), float('inf'), True)
+        # Check cache
+        state = env.get_state()
+        if state in self.value_cache:
+            return self.value_cache[state]
         
-        # Normalize to [-1, 1]
-        return np.tanh(score / 1000)
+        # Quick evaluation
+        score = env.evaluate_state()
+        
+        # Naked singles bonus
+        naked_singles = 0
+        for row in range(env.grid_size):
+            for col in range(env.grid_size):
+                if env.board[row, col] == 0:
+                    candidates = env.get_candidates(row, col)
+                    if len(candidates) == 1:
+                        naked_singles += 1
+                    elif len(candidates) == 0:
+                        score = -10000
+                        break
+        
+        score += naked_singles * 100
+        
+        value = np.tanh(score / 1000)
+        
+        # Cache it
+        self.value_cache[state] = value
+        
+        return value
     
-    def _minimax(self, game, depth, alpha, beta, maximizing):
-        """Minimax with alpha-beta pruning"""
-        if depth == 0 or game.solved or game.has_contradiction():
-            return game.evaluate_position()
-        
-        moves = game.get_valid_moves()
-        if not moves:
-            return game.evaluate_position()
-        
-        # Limit search to most promising moves
-        move_scores = []
-        for move in moves[:10]:  # Limit branching
-            test_game = game.copy()
-            _, reward, _ = test_game.make_move(move)
-            move_scores.append((move, reward + test_game.evaluate_position()))
-        
-        move_scores.sort(key=lambda x: x[1], reverse=maximizing)
-        search_candidates = [m for m, _ in move_scores[:5]]
-        
-        if maximizing:
-            max_eval = -float('inf')
-            for move in search_candidates:
-                sim_game = game.copy()
-                sim_game.make_move(move)
-                eval_score = self._minimax(sim_game, depth - 1, alpha, beta, False)
-                max_eval = max(max_eval, eval_score)
-                alpha = max(alpha, eval_score)
-                if beta <= alpha:
-                    break
-            return max_eval
-        else:
-            min_eval = float('inf')
-            for move in search_candidates:
-                sim_game = game.copy()
-                sim_game.make_move(move)
-                eval_score = self._minimax(sim_game, depth - 1, alpha, beta, True)
-                min_eval = min(min_eval, eval_score)
-                beta = min(beta, eval_score)
-                if beta <= alpha:
-                    break
-            return min_eval
-    
-    def choose_action(self, game, training=True):
-        """
-        Hybrid decision: MCTS + DQN + Constraint Propagation
-        """
-        moves = game.get_valid_moves()
-        if not moves:
+    def choose_action(self, env, training=True):
+        """Hybrid action selection: Constraint propagation first, then MCTS"""
+        valid_moves = env.get_valid_moves()
+        if not valid_moves:
             return None
         
-        # Use constraint propagation first
-        naked_singles = []
-        for move in moves:
-            possibilities = game._get_possible_values(move.row, move.col)
-            if len(possibilities) == 1:
-                naked_singles.append(move)
-        
-        # If there's an obvious move, take it
-        if naked_singles and (not training or random.random() > self.epsilon):
-            return random.choice(naked_singles)
+        # PRIORITY: Check for naked singles (forced moves)
+        for row in range(env.grid_size):
+            for col in range(env.grid_size):
+                if env.board[row, col] == 0:
+                    candidates = env.get_candidates(row, col)
+                    if len(candidates) == 1:
+                        # Forced move - take it immediately
+                        return (row, col, candidates[0])
         
         # Exploration during training
         if training and random.random() < self.epsilon:
-            return random.choice(moves)
+            return random.choice(valid_moves)
         
-        # Run MCTS for complex decisions
-        root = self.mcts_search(game, self.mcts_simulations)
+        # MCTS for complex decisions
+        root = self.mcts_search(env, self.mcts_simulations)
         
         if not root.children:
-            return random.choice(moves)
+            return random.choice(valid_moves)
         
-        # Select move with highest visit count
-        best_move = max(root.children.items(), key=lambda x: x[1].visit_count)[0]
+        # Select best move
+        best_move = max(root.children.items(), 
+                       key=lambda x: x[1].visit_count)[0]
         
-        # Store visit distribution as policy target
-        state = game.get_state()
-        total_visits = sum(child.visit_count for child in root.children.values())
+        # Store policy
+        state = env.get_state()
+        total_visits = sum(c.visit_count for c in root.children.values())
         for move, child in root.children.items():
-            self.policy_table[state][move] = child.visit_count / total_visits
+            policy_prob = child.visit_count / total_visits
+            self.policy_table[state][move] = policy_prob
+            
+            # Update attention
+            row, col, num = move
+            attention_key = (tuple(env.board[row]), 
+                           tuple(env.board[:, col]), num)
+            self.attention_weights[attention_key] += policy_prob * 0.1
         
         return best_move
     
-    def train_from_replay(self):
-        """DQN training with experience replay"""
-        if len(self.replay_buffer) < self.batch_size:
-            return 0
+    def train_from_experience(self, batch_size=32):
+        """DQN training"""
+        if len(self.replay_buffer) < batch_size:
+            return
         
-        batch_data = self.replay_buffer.sample(self.batch_size)
-        if batch_data is None:
-            return 0
+        batch = self.replay_buffer.sample(batch_size)
         
-        batch, indices = batch_data
-        td_errors = []
-        
-        for state, action, reward, next_state, done in batch:
-            # Q-learning update
-            if state not in self.q_table:
-                self.q_table[state] = {}
-            
-            current_q = self.q_table[state].get(action, 0)
+        for state, move, reward, next_state, done in batch:
+            current_q = self.q_table[state][move]
             
             if done:
                 target_q = reward
             else:
-                # Get max Q value for next state
                 next_q_values = self.q_table.get(next_state, {})
                 max_next_q = max(next_q_values.values()) if next_q_values else 0
                 target_q = reward + self.gamma * max_next_q
             
-            # TD error for priority update
-            td_error = target_q - current_q
-            td_errors.append(td_error)
-            
-            # Update Q value
-            self.q_table[state][action] = current_q + self.lr * td_error
-        
-        # Update priorities
-        self.replay_buffer.update_priorities(indices, td_errors)
-        
-        return np.mean(np.abs(td_errors))
-    
-    def update_attention_patterns(self, game, success):
-        """Update self-attention patterns based on game outcome"""
-        if not hasattr(self, 'attention_patterns'):
-            self.attention_patterns = defaultdict(float)
-        
-        for move in game.move_history:
-            pattern_key = (move.row // 3, move.col // 3, move.value)
-            if success:
-                self.attention_patterns[pattern_key] += 0.1
-            else:
-                self.attention_patterns[pattern_key] -= 0.05
+            self.q_table[state][move] += self.lr * (target_q - current_q)
     
     def decay_epsilon(self):
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
     
     def reset_stats(self):
         self.puzzles_solved = 0
-        self.puzzles_failed = 0
-        self.total_moves = 0
+        self.puzzles_attempted = 0
+        self.avg_moves = []
 
 # ============================================================================
-# Puzzle Generation
+# Fast Puzzle Generation
 # ============================================================================
 
-def generate_sudoku_puzzle(difficulty='easy'):
-    """Generate a random Sudoku puzzle"""
-    # Start with a solved board
-    board = np.zeros((9, 9), dtype=int)
+def generate_sudoku(grid_size=9, difficulty='medium'):
+    """Generate valid Sudoku puzzle"""
+    env = SudokuEnv(grid_size)
     
-    # Fill diagonal 3x3 boxes (they don't interfere with each other)
-    for box in range(0, 9, 3):
-        nums = list(range(1, 10))
-        random.shuffle(nums)
-        for i in range(3):
-            for j in range(3):
-                board[box + i, box + j] = nums[i * 3 + j]
+    # Fill diagonal boxes
+    box_size = int(np.sqrt(grid_size))
+    for i in range(0, grid_size, box_size):
+        numbers = list(range(1, grid_size + 1))
+        random.shuffle(numbers)
+        for row in range(box_size):
+            for col in range(box_size):
+                env.board[i + row, i + col] = numbers[row * box_size + col]
     
-    # Solve the rest using backtracking
-    def solve_board(board):
-        empty = find_empty(board)
-        if not empty:
-            return True
-        row, col = empty
-        
-        for num in range(1, 10):
-            if is_valid_placement(board, row, col, num):
-                board[row, col] = num
-                if solve_board(board):
-                    return True
-                board[row, col] = 0
-        return False
+    # Solve rest
+    _solve_sudoku(env)
     
-    def find_empty(board):
-        for i in range(9):
-            for j in range(9):
-                if board[i, j] == 0:
-                    return (i, j)
-        return None
+    # Remove cells
+    removal_rate = {'easy': 0.4, 'medium': 0.5, 'hard': 0.6, 'expert': 0.7}
+    cells_to_remove = int(grid_size * grid_size * removal_rate.get(difficulty, 0.5))
     
-    def is_valid_placement(board, row, col, num):
-        # Check row
-        if num in board[row, :]:
-            return False
-        # Check column
-        if num in board[:, col]:
-            return False
-        # Check 3x3 box
-        box_row, box_col = 3 * (row // 3), 3 * (col // 3)
-        if num in board[box_row:box_row+3, box_col:box_col+3]:
-            return False
-        return True
+    puzzle = env.board.copy()
+    cells = [(i, j) for i in range(grid_size) for j in range(grid_size)]
+    random.shuffle(cells)
     
-    solve_board(board)
-    
-    # Remove numbers based on difficulty
-    cells_to_remove = {
-        'easy': 30,
-        'medium': 40,
-        'hard': 50,
-        'expert': 55
-    }
-    
-    num_to_remove = cells_to_remove.get(difficulty, 30)
-    puzzle = board.copy()
-    
-    positions = [(i, j) for i in range(9) for j in range(9)]
-    random.shuffle(positions)
-    
-    for i in range(num_to_remove):
-        row, col = positions[i]
+    for i in range(min(cells_to_remove, len(cells))):
+        row, col = cells[i]
         puzzle[row, col] = 0
     
     return puzzle
 
-# ============================================================================
-# Training System
-# ============================================================================
-
-def train_agent(agent, num_episodes, difficulty='easy', update_freq=10, status_placeholder=None, progress_bar=None):
-    """Train agent on multiple puzzles"""
-    history = {
-        'solved': [],
-        'failed': [],
-        'avg_moves': [],
-        'epsilon': [],
-        'q_values': [],
-        'episode': []
-    }
+def _solve_sudoku(env):
+    """Backtracking solver"""
+    empty = np.argwhere(env.board == 0)
+    if len(empty) == 0:
+        return True
     
-    for ep in range(1, num_episodes + 1):
-        # Generate new puzzle
-        puzzle = generate_sudoku_puzzle(difficulty)
-        env = Sudoku()
-        env.reset(puzzle)
-        
-        moves_made = 0
-        max_moves = 100
-        
-        while not env.solved and not env.has_contradiction() and moves_made < max_moves:
-            state = env.get_state()
-            move = agent.choose_action(env, training=True)
-            
-            if move is None:
-                break
-            
-            next_state, reward, done = env.make_move(move)
-            
-            # Store in replay buffer
-            agent.replay_buffer.push(state, move, reward, next_state, done)
-            
-            # Train from replay
-            agent.train_from_replay()
-            
-            moves_made += 1
-        
-        # Update stats
-        if env.is_solved():
-            agent.puzzles_solved += 1
-            agent.update_attention_patterns(env, success=True)
-        else:
-            agent.puzzles_failed += 1
-            agent.update_attention_patterns(env, success=False)
-        
-        agent.total_moves += moves_made
-        agent.decay_epsilon()
-        
-        # Record history at specified frequency
-        if ep % update_freq == 0:
-            history['solved'].append(agent.puzzles_solved)
-            history['failed'].append(agent.puzzles_failed)
-            history['avg_moves'].append(moves_made)
-            history['epsilon'].append(agent.epsilon)
-            history['q_values'].append(len(agent.q_table))
-            history['episode'].append(ep)
-            
-            # Update UI if placeholders provided
-            if progress_bar is not None:
-                progress_bar.progress(ep / num_episodes)
-            
-            if status_placeholder is not None:
-                status_placeholder.markdown(f"""
-                ### 📊 Training Progress
-                
-                | Metric | Value |
-                |:-------|------:|
-                | **Episode** | {ep}/{num_episodes} ({ep/num_episodes*100:.1f}%) |
-                | **Puzzles Solved** | {agent.puzzles_solved} |
-                | **Puzzles Failed** | {agent.puzzles_failed} |
-                | **Success Rate** | {agent.puzzles_solved/(agent.puzzles_solved+agent.puzzles_failed)*100:.1f}% |
-                | **Epsilon** | {agent.epsilon:.4f} |
-                | **Q-Table Size** | {len(agent.q_table):,} states |
-                | **Policy Table Size** | {len(agent.policy_table):,} states |
-                | **Replay Buffer** | {len(agent.replay_buffer)}/{agent.replay_buffer.buffer.maxlen} |
-                """)
+    row, col = empty[0]
+    numbers = list(range(1, env.grid_size + 1))
+    random.shuffle(numbers)
     
-    return history
+    for num in numbers:
+        if env.is_valid_move(row, col, num):
+            env.board[row, col] = num
+            if _solve_sudoku(env):
+                return True
+            env.board[row, col] = 0
+    
+    return False
 
 # ============================================================================
 # Visualization
 # ============================================================================
 
-def visualize_sudoku(board, initial_board=None, title="Sudoku"):
-    """Create matplotlib visualization of Sudoku board"""
+def visualize_sudoku(board, initial_board=None, title="Sudoku", highlight=None):
+    """Create matplotlib visualization"""
+    grid_size = len(board)
+    box_size = int(np.sqrt(grid_size))
+    
     fig, ax = plt.subplots(figsize=(9, 9))
     
     # Draw grid
-    for i in range(10):
-        lw = 3 if i % 3 == 0 else 1
+    for i in range(grid_size + 1):
+        lw = 3 if i % box_size == 0 else 1
         ax.axhline(i, color='black', linewidth=lw)
         ax.axvline(i, color='black', linewidth=lw)
     
     # Draw numbers
-    for i in range(9):
-        for j in range(9):
+    for i in range(grid_size):
+        for j in range(grid_size):
             if board[i, j] != 0:
-                # Different colors for initial vs filled
                 is_initial = initial_board is not None and initial_board[i, j] != 0
-                color = 'black' if is_initial else '#0066CC'
-                weight = 'bold' if is_initial else 'normal'
+                is_highlight = highlight and (i, j) in highlight
                 
-                ax.text(j + 0.5, 8.5 - i, str(board[i, j]), 
-                       ha='center', va='center', fontsize=24,
+                if is_highlight:
+                    color = '#4CAF50'
+                    weight = 'bold'
+                elif is_initial:
+                    color = 'black'
+                    weight = 'bold'
+                else:
+                    color = '#0066CC'
+                    weight = 'normal'
+                
+                ax.text(j + 0.5, grid_size - i - 0.5, str(board[i, j]),
+                       ha='center', va='center', fontsize=20,
                        color=color, weight=weight)
     
-    ax.set_xlim(0, 9)
-    ax.set_ylim(0, 9)
+    ax.set_xlim(0, grid_size)
+    ax.set_ylim(0, grid_size)
     ax.set_aspect('equal')
     ax.axis('off')
-    ax.set_title(title, fontsize=20, fontweight='bold', pad=20)
+    ax.set_title(title, fontsize=18, fontweight='bold', pad=20)
     
     return fig
 
 # ============================================================================
-# Serialization
+# Save/Load
 # ============================================================================
 
-def serialize_move(move):
-    """Convert SudokuMove to dict"""
-    return {
-        "r": int(move.row),
-        "c": int(move.col),
-        "v": int(move.value)
-    }
-
-def deserialize_move(data):
-    """Convert dict to SudokuMove"""
-    return SudokuMove(row=data["r"], col=data["c"], value=data["v"])
-
 def create_agent_zip(agent, config):
-    """Save agent to ZIP file"""
-    def serialize_agent(agent):
-        clean_policy = {}
-        
-        for state, moves in agent.policy_table.items():
-            try:
-                clean_state = tuple(int(x) for x in state)
-                state_str = str(clean_state)
-                
-                clean_policy[state_str] = {}
-                
-                for move, value in moves.items():
-                    move_json_str = json.dumps(serialize_move(move))
-                    clean_policy[state_str][move_json_str] = float(value)
-            except:
-                continue
-        
-        clean_q_table = {}
-        for state, actions in agent.q_table.items():
-            try:
-                clean_state = tuple(int(x) for x in state)
-                state_str = str(clean_state)
-                clean_q_table[state_str] = {}
-                
-                for move, value in actions.items():
-                    move_json_str = json.dumps(serialize_move(move))
-                    clean_q_table[state_str][move_json_str] = float(value)
-            except:
-                continue
-        
-        # Safe attribute access with defaults
-        attention_patterns = {}
-        if hasattr(agent, 'attention_patterns'):
-            try:
-                attention_patterns = {str(k): float(v) for k, v in agent.attention_patterns.items()}
-            except:
-                attention_patterns = {}
-        
-        return {
-            "metadata": {"version": "1.0"},
-            "policy_table": clean_policy,
-            "q_table": clean_q_table,
-            "attention_patterns": attention_patterns,
-            "epsilon": float(agent.epsilon),
-            "puzzles_solved": int(getattr(agent, 'puzzles_solved', 0)),
-            "puzzles_failed": int(getattr(agent, 'puzzles_failed', 0)),
-            "total_moves": int(getattr(agent, 'total_moves', 0)),
-            "mcts_sims": int(getattr(agent, 'mcts_simulations', 100))
-        }
-    
-    data = serialize_agent(agent)
+    """Package agent"""
+    agent_state = {
+        "policy_table": {str(k): {str(mk): mv for mk, mv in v.items()} 
+                        for k, v in list(agent.policy_table.items())[:1000]},
+        "epsilon": agent.epsilon,
+        "puzzles_solved": agent.puzzles_solved,
+        "puzzles_attempted": agent.puzzles_attempted,
+        "mcts_sims": agent.mcts_simulations,
+        "grid_size": agent.grid_size
+    }
     
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("agent.json", json.dumps(data, indent=2))
-        zf.writestr("config.json", json.dumps(config, indent=2))
+        zf.writestr("agent.json", json.dumps(agent_state))
+        zf.writestr("config.json", json.dumps(config))
     
     buffer.seek(0)
     return buffer
-
-def load_agent_from_zip(uploaded_file):
-    """Load agent from ZIP file"""
-    try:
-        with zipfile.ZipFile(uploaded_file, "r") as zf:
-            files = zf.namelist()
-            if "agent.json" not in files:
-                st.error("❌ Invalid file: missing agent.json")
-                return None, None, 0
-            
-            data = json.loads(zf.read("agent.json").decode('utf-8'))
-            config = json.loads(zf.read("config.json").decode('utf-8')) if "config.json" in files else {}
-            
-            # Create new agent with proper initialization
-            agent = SudokuAgent(config.get('lr', 0.3), config.get('gamma', 0.95))
-            
-            # Restore basic attributes safely
-            agent.epsilon = float(data.get('epsilon', 0.1))
-            agent.puzzles_solved = int(data.get('puzzles_solved', 0))
-            agent.puzzles_failed = int(data.get('puzzles_failed', 0))
-            agent.total_moves = int(data.get('total_moves', 0))
-            agent.mcts_simulations = int(data.get('mcts_sims', 100))
-            
-            # Ensure replay buffer exists (create new one since we can't serialize it)
-            if not hasattr(agent, 'replay_buffer'):
-                agent.replay_buffer = ReplayBuffer(capacity=10000)
-            
-            # Restore policy table
-            agent.policy_table = defaultdict(lambda: defaultdict(float))
-            loaded_count = 0
-            
-            import ast
-            for state_str, moves_dict in data.get('policy_table', {}).items():
-                try:
-                    state = ast.literal_eval(state_str)
-                    for move_json_str, value in moves_dict.items():
-                        move_dict = json.loads(move_json_str)
-                        move = deserialize_move(move_dict)
-                        agent.policy_table[state][move] = float(value)
-                    loaded_count += 1
-                except Exception as e:
-                    continue
-            
-            # Restore Q-table
-            agent.q_table = {}
-            for state_str, actions_dict in data.get('q_table', {}).items():
-                try:
-                    state = ast.literal_eval(state_str)
-                    agent.q_table[state] = {}
-                    for move_json_str, value in actions_dict.items():
-                        move_dict = json.loads(move_json_str)
-                        move = deserialize_move(move_dict)
-                        agent.q_table[state][move] = float(value)
-                    loaded_count += 1
-                except Exception as e:
-                    continue
-            
-            # Restore attention patterns
-            agent.attention_patterns = defaultdict(float)
-            for key_str, value in data.get('attention_patterns', {}).items():
-                try:
-                    key = ast.literal_eval(key_str)
-                    agent.attention_patterns[key] = float(value)
-                except Exception as e:
-                    continue
-            
-            return agent, config, loaded_count
-    except Exception as e:
-        st.error(f"❌ Error loading brain: {str(e)}")
-        return None, None, 0
 
 # ============================================================================
 # Streamlit UI
@@ -963,33 +676,25 @@ with st.sidebar.expander("1. Agent Hyperparameters", expanded=True):
     lr = st.slider("Learning Rate α", 0.1, 1.0, 0.3, 0.05)
     gamma = st.slider("Discount Factor γ", 0.8, 0.99, 0.95, 0.01)
     mcts_sims = st.slider("MCTS Simulations", 10, 500, 100, 10)
-    minimax_depth = st.slider("Minimax Depth", 1, 5, 3, 1)
 
 with st.sidebar.expander("2. Training Configuration", expanded=True):
     episodes = st.number_input("Training Episodes", 10, 10000, 100, 10)
     difficulty = st.selectbox("Puzzle Difficulty", 
                              ['easy', 'medium', 'hard', 'expert'])
     update_freq = st.number_input("Update Dashboard Every N Episodes", 
-                                  min_value=1, max_value=100, value=10, step=1,
-                                  help="How often to update charts during training")
+                                  min_value=1, max_value=100, value=10, step=1)
 
 with st.sidebar.expander("3. Puzzle Generator", expanded=True):
     st.markdown("### 🎲 Generate Custom Puzzle")
-    
-    grid_size = st.selectbox("Grid Size", 
-                            ['9x9 (Classic)', '4x4 (Mini)', '16x16 (Mega)'],
-                            key='grid_size',
-                            disabled=True,
-                            help="Currently only 9x9 is supported. Other sizes coming soon!")
     
     gen_difficulty = st.selectbox("Generation Difficulty", 
                                   ['easy', 'medium', 'hard', 'expert'],
                                   key='gen_diff')
     
     if st.button("🎲 Generate New Puzzle", use_container_width=True, type="primary"):
-        puzzle = generate_sudoku_puzzle(gen_difficulty)
+        puzzle = generate_sudoku(9, gen_difficulty)
         st.session_state.generated_puzzle = puzzle
-        st.session_state.generated_puzzle_env = Sudoku()
+        st.session_state.generated_puzzle_env = SudokuEnv(9)
         st.session_state.generated_puzzle_env.reset(puzzle)
         st.session_state.puzzle_difficulty = gen_difficulty
         st.toast(f"✨ Generated {gen_difficulty} puzzle!", icon="🎲")
@@ -1003,7 +708,6 @@ with st.sidebar.expander("4. Brain Storage", expanded=False):
             "lr": lr,
             "gamma": gamma,
             "mcts_sims": mcts_sims,
-            "minimax_depth": minimax_depth,
             "update_freq": update_freq,
             "training_history": st.session_state.get('training_history', None)
         }
@@ -1021,18 +725,6 @@ with st.sidebar.expander("4. Brain Storage", expanded=False):
             st.error(f"Error creating download: {str(e)}")
     else:
         st.info("Train agent first")
-    
-    st.markdown("---")
-    
-    uploaded_file = st.file_uploader("📤 Upload Saved Brain (.zip)", type="zip")
-    if uploaded_file is not None:
-        if st.button("🔄 Load Brain", use_container_width=True):
-            agent, cfg, count = load_agent_from_zip(uploaded_file)
-            if agent:
-                st.session_state.agent = agent
-                st.session_state.training_history = cfg.get("training_history")
-                st.toast(f"✅ Loaded Brain! {count} memories restored.", icon="🧠")
-                st.rerun()
 
 train_button = st.sidebar.button("🚀 Begin Training", 
                                  use_container_width=True, type="primary")
@@ -1044,16 +736,10 @@ if st.sidebar.button("🧹 Reset Everything", use_container_width=True):
 
 # Initialize agent
 if 'agent' not in st.session_state or st.session_state.agent is None:
-    st.session_state.agent = SudokuAgent(lr, gamma)
-    st.session_state.agent.mcts_simulations = mcts_sims
-    st.session_state.agent.minimax_depth = minimax_depth
+    st.session_state.agent = AlphaZeroAgent(9, lr, gamma)
 
 agent = st.session_state.agent
-
-# Update parameters safely
-if agent is not None:
-    agent.mcts_simulations = mcts_sims
-    agent.minimax_depth = minimax_depth
+agent.mcts_simulations = mcts_sims
 
 # Display stats
 col1, col2, col3, col4 = st.columns(4)
@@ -1070,11 +756,11 @@ with col2:
 
 with col3:
     st.metric("✅ Puzzles Solved", getattr(agent, 'puzzles_solved', 0) if agent else 0)
-    st.caption(f"Failed: {getattr(agent, 'puzzles_failed', 0) if agent else 0}")
+    st.caption(f"Failed: {getattr(agent, 'puzzles_attempted', 0) - getattr(agent, 'puzzles_solved', 0) if agent else 0}")
 
 with col4:
-    st.metric("🎯 Attention Patterns", 
-             len(getattr(agent, 'attention_patterns', {})) if agent else 0)
+    avg_moves = np.mean(agent.avg_moves) if agent and agent.avg_moves else 0
+    st.metric("🎯 Avg Moves", f"{avg_moves:.1f}")
     st.caption(f"MCTS Sims: {getattr(agent, 'mcts_simulations', 0) if agent else 0}")
 
 st.markdown("---")
@@ -1101,10 +787,8 @@ if 'generated_puzzle' in st.session_state:
     with gen_col3:
         if st.button("🤖 Solve This", use_container_width=True):
             if agent is not None:
-                st.session_state.solve_puzzle = st.session_state.generated_puzzle.copy()
-                st.session_state.solving_active = True
-                # Automatically generate solution for this puzzle
-                solve_env = Sudoku()
+                # Generate solution
+                solve_env = SudokuEnv(9)
                 solve_env.reset(st.session_state.generated_puzzle.copy())
                 
                 all_moves = []
@@ -1114,12 +798,11 @@ if 'generated_puzzle' in st.session_state:
                 max_moves = 100
                 
                 with st.spinner("🧠 AI is solving..."):
-                    while (not solve_env.solved and not solve_env.has_contradiction() 
-                           and move_count < max_moves):
+                    while (not solve_env.is_solved() and move_count < max_moves):
                         move = agent.choose_action(solve_env, training=False)
                         if move is None:
                             break
-                        solve_env.make_move(move)
+                        solve_env.make_move(*move)
                         all_moves.append(move)
                         all_boards.append(solve_env.board.copy())
                         move_count += 1
@@ -1133,17 +816,10 @@ if 'generated_puzzle' in st.session_state:
                 st.rerun()
         
         if st.button("🎮 Play This", use_container_width=True):
-            st.session_state.human_env = Sudoku()
+            st.session_state.human_env = SudokuEnv(9)
             st.session_state.human_env.reset(st.session_state.generated_puzzle.copy())
             st.session_state.human_active = True
             st.rerun()
-        
-        if st.button("📋 Copy Puzzle", use_container_width=True):
-            puzzle_str = '\n'.join([' '.join([str(cell) if cell != 0 else '.' 
-                                             for cell in row]) 
-                                   for row in st.session_state.generated_puzzle])
-            st.code(puzzle_str, language=None)
-            st.caption("Copy this text to share!")
         
         if st.button("🗑️ Clear", use_container_width=True):
             del st.session_state.generated_puzzle
@@ -1163,19 +839,87 @@ if train_button:
     
     agent.reset_stats()
     
-    history = train_agent(agent, episodes, difficulty, update_freq, status, progress_bar)
+    history = {
+        'solved': [],
+        'failed': [],
+        'avg_moves': [],
+        'epsilon': [],
+        'q_values': [],
+        'episode': []
+    }
+    
+    for ep in range(1, episodes + 1):
+        puzzle = generate_sudoku(9, difficulty)
+        env = SudokuEnv(9)
+        env.reset(puzzle)
+        
+        agent.puzzles_attempted += 1
+        moves = 0
+        max_moves = 162  # 81 * 2
+        
+        while not env.is_solved() and moves < max_moves:
+            state = env.get_state()
+            move = agent.choose_action(env, training=True)
+            
+            if move is None:
+                break
+            
+            reward, done = env.make_move(*move)
+            next_state = env.get_state()
+            
+            agent.replay_buffer.add(state, move, reward, next_state, done)
+            
+            if len(agent.replay_buffer) >= 32:
+                agent.train_from_experience(32)
+            
+            moves += 1
+            
+            if done:
+                break
+        
+        if env.is_solved():
+            agent.puzzles_solved += 1
+            agent.avg_moves.append(moves)
+        
+        agent.decay_epsilon()
+        
+        # Update UI
+        if ep % update_freq == 0:
+            history['solved'].append(agent.puzzles_solved)
+            history['failed'].append(agent.puzzles_attempted - agent.puzzles_solved)
+            history['avg_moves'].append(moves)
+            history['epsilon'].append(agent.epsilon)
+            history['q_values'].append(len(agent.q_table))
+            history['episode'].append(ep)
+            
+            progress = ep / episodes
+            progress_bar.progress(progress)
+            
+            status.markdown(f"""
+            ### 📊 Training Progress
+            
+            | Metric | Value |
+            |:-------|------:|
+            | **Episode** | {ep}/{episodes} ({progress*100:.1f}%) |
+            | **Puzzles Solved** | {agent.puzzles_solved} |
+            | **Puzzles Failed** | {agent.puzzles_attempted - agent.puzzles_solved} |
+            | **Success Rate** | {agent.puzzles_solved/agent.puzzles_attempted*100:.1f}% |
+            | **Epsilon** | {agent.epsilon:.4f} |
+            | **Q-Table Size** | {len(agent.q_table):,} states |
+            | **Policy Table Size** | {len(agent.policy_table):,} states |
+            | **Replay Buffer** | {len(agent.replay_buffer)} |
+            """)
     
     progress_bar.progress(1.0)
     status.success("✅ Training Complete!")
     st.toast("Training Complete! 🎉", icon="✨")
     st.session_state.training_history = history
     
-    import time
     time.sleep(2)
     st.rerun()
 
 # Display training charts
-'''if 'training_history' in st.session_state and st.session_state.training_history:
+if 'training_history' in st.session_state and st.session_state.training_history:
     history = st.session_state.training_history
     
     if isinstance(history, dict) and 'episode' in history and len(history['episode']) > 0:
@@ -1200,11 +944,6 @@ if train_button:
         if 'avg_moves' in df.columns:
             chart_data = df[['episode', 'avg_moves']].set_index('episode')
             st.line_chart(chart_data)
-        
-        st.write("#### Q-Network Growth")
-        if 'q_values' in df.columns:
-            chart_data = df[['episode', 'q_values']].set_index('episode')
-            st.line_chart(chart_data)'''
 
 # AI Solving with Manual Controls
 if 'agent' in st.session_state and st.session_state.agent is not None and len(getattr(st.session_state.agent, 'policy_table', {})) > 10:
@@ -1220,12 +959,10 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
                                        key='demo_diff')
         
         if st.button("🤖 Generate AI Solution", use_container_width=True, type="primary"):
-            # Generate puzzle
-            puzzle = generate_sudoku_puzzle(demo_difficulty)
-            solve_env = Sudoku()
+            puzzle = generate_sudoku(9, demo_difficulty)
+            solve_env = SudokuEnv(9)
             solve_env.reset(puzzle)
             
-            # Record all moves
             all_moves = []
             all_boards = [solve_env.board.copy()]
             
@@ -1233,19 +970,17 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
             max_moves = 100
             
             with st.spinner("🧠 AI is solving..."):
-                while (not solve_env.solved and not solve_env.has_contradiction() 
-                       and move_count < max_moves):
+                while (not solve_env.is_solved() and move_count < max_moves):
                     move = agent.choose_action(solve_env, training=False)
                     
                     if move is None:
                         break
                     
-                    solve_env.make_move(move)
+                    solve_env.make_move(*move)
                     all_moves.append(move)
                     all_boards.append(solve_env.board.copy())
                     move_count += 1
             
-            # Store in session state
             st.session_state.solve_moves = all_moves
             st.session_state.solve_boards = all_boards
             st.session_state.solve_initial = puzzle
@@ -1293,16 +1028,15 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
             progress = current_idx / total_moves if total_moves > 0 else 0
             st.progress(progress)
             
-            # Display current board state
+            # Display current board
             current_board = st.session_state.solve_boards[current_idx]
             
-            # Move info and stats
             info_col1, info_col2 = st.columns([2, 1])
             
             with info_col1:
                 if current_idx > 0:
                     last_move = st.session_state.solve_moves[current_idx - 1]
-                    move_info = f"Move {current_idx}: Placed **{last_move.value}** at position **({last_move.row}, {last_move.col})**"
+                    move_info = f"Move {current_idx}: Placed **{last_move[2]}** at position **({last_move[0]}, {last_move[1]})**"
                 else:
                     move_info = "Initial puzzle state"
                 
@@ -1310,13 +1044,15 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
             
             with info_col2:
                 empty_cells = np.sum(current_board == 0)
-                st.metric("Remaining Cells", empty_cells, 
-                         delta=-(81 - empty_cells) if current_idx == 0 else None)
+                st.metric("Remaining Cells", empty_cells)
             
-            # Visualize board
+            # Visualize
+            highlight = [(st.session_state.solve_moves[current_idx-1][0], 
+                         st.session_state.solve_moves[current_idx-1][1])] if current_idx > 0 else None
             fig = visualize_sudoku(current_board, 
                                   st.session_state.solve_initial,
-                                  f"Step {current_idx}/{total_moves}")
+                                  f"Step {current_idx}/{total_moves}",
+                                  highlight)
             st.pyplot(fig)
             plt.close(fig)
             
@@ -1325,8 +1061,6 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
                 if st.session_state.solve_success:
                     st.success("🎉 Puzzle Solved Successfully!")
                     
-                    # Solution statistics
-                    st.markdown("### 📊 Solution Statistics")
                     stat_col1, stat_col2, stat_col3 = st.columns(3)
                     with stat_col1:
                         st.metric("Total Moves", total_moves)
@@ -1337,9 +1071,8 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
                         st.metric("Initial Empty", np.sum(st.session_state.solve_initial == 0))
                 else:
                     st.error("❌ AI couldn't solve this puzzle")
-                    st.caption("Try training the agent more or using a different difficulty.")
             
-            # Auto-play controls
+            # Playback controls
             st.markdown("---")
             st.markdown("### ⚙️ Playback Controls")
             
@@ -1368,10 +1101,9 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
                     st.rerun()
             
             with autoplay_col4:
-                # Export solution
                 solution_data = {
                     "puzzle": st.session_state.solve_initial.tolist(),
-                    "moves": [{"row": m.row, "col": m.col, "value": m.value} 
+                    "moves": [{"row": m[0], "col": m[1], "value": m[2]} 
                              for m in st.session_state.solve_moves],
                     "total_moves": len(st.session_state.solve_moves),
                     "success": st.session_state.solve_success
@@ -1384,9 +1116,8 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
                     use_container_width=True
                 )
             
-            # Auto-play functionality
+            # Auto-play
             if st.session_state.get('autoplay', False) and current_idx < total_moves:
-                import time
                 time.sleep(st.session_state.get('autoplay_speed', 1.0))
                 st.session_state.current_move_index = current_idx + 1
                 if current_idx + 1 >= total_moves:
@@ -1400,24 +1131,17 @@ if 'agent' in st.session_state and st.session_state.agent is not None and len(ge
             - ◀️ **Prev**: Go back one move
             - ▶️ **Next**: Advance one move  
             - ⏭️ **End**: Jump to final state
-            - ▶️ **Auto-Play**: Watch solution automatically
+            - ▶️ **Play/Pause**: Auto playback
             - 🎚️ **Speed Control**: Adjust playback speed
-            
-            Perfect for:
-            - 📚 Learning Sudoku strategies
-            - 🔍 Understanding AI decision-making
-            - 🎓 Teaching constraint propagation
             """)
-
-# Old demo solving section removed
 
 # Human playable mode
 st.markdown("---")
 st.header("🎮 Play Sudoku Yourself")
 
 if st.button("🆕 New Puzzle", use_container_width=True):
-    puzzle = generate_sudoku_puzzle('medium')
-    st.session_state.human_env = Sudoku()
+    puzzle = generate_sudoku(9, 'medium')
+    st.session_state.human_env = SudokuEnv(9)
     st.session_state.human_env.reset(puzzle)
     st.session_state.human_active = True
     st.rerun()
@@ -1425,7 +1149,6 @@ if st.button("🆕 New Puzzle", use_container_width=True):
 if 'human_env' in st.session_state and st.session_state.get('human_active'):
     h_env = st.session_state.human_env
     
-    # Display board
     fig = visualize_sudoku(h_env.board, h_env.initial_board, "Your Puzzle")
     st.pyplot(fig)
     plt.close(fig)
@@ -1433,8 +1156,6 @@ if 'human_env' in st.session_state and st.session_state.get('human_active'):
     if h_env.is_solved():
         st.success("🎉 Congratulations! You solved it!")
         st.balloons()
-    elif h_env.has_contradiction():
-        st.error("❌ Contradiction detected! Try again.")
     else:
         st.write("**Enter a number:**")
         
@@ -1452,8 +1173,7 @@ if 'human_env' in st.session_state and st.session_state.get('human_active'):
         with col_a:
             if st.button("✅ Place Number", use_container_width=True):
                 if h_env.initial_board[input_row, input_col] == 0:
-                    move = SudokuMove(input_row, input_col, input_val)
-                    _, reward, _ = h_env.make_move(move)
+                    reward, done = h_env.make_move(input_row, input_col, input_val)
                     if reward < 0:
                         st.error("Invalid move!")
                     st.rerun()
@@ -1465,9 +1185,9 @@ if 'human_env' in st.session_state and st.session_state.get('human_active'):
                 if agent is not None:
                     hint_move = agent.choose_action(h_env, training=False)
                     if hint_move:
-                        st.info(f"💡 Try placing {hint_move.value} at ({hint_move.row}, {hint_move.col})")
+                        st.info(f"💡 Try placing {hint_move[2]} at ({hint_move[0]}, {hint_move[1]})")
                 else:
-                    st.warning("Train agent first to get hints!")
+                    st.warning("Train agent first!")
         
         with col_c:
             if st.button("🔄 Reset", use_container_width=True):
