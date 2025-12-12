@@ -899,7 +899,7 @@ if 'generated_puzzle' in st.session_state:
         st.metric("Filled Cells", 81 - empty_cells)
     
     with gen_col3:
-        if st.button("🤖 Solve This", use_container_width=True):
+        if st.button(" Solve This", use_container_width=True):
             if agent is not None:
                 # Generate solution
                 solve_env = SudokuEnv(9)
@@ -1075,7 +1075,7 @@ if 'agent' in st.session_state and st.session_state.agent is not None:
                                        ['easy', 'medium', 'hard', 'expert'],
                                        key='demo_diff')
         
-        if st.button("🤖 Generate AI Solution", use_container_width=True, type="primary"):
+        if st.button(" Generate AI Solution", use_container_width=True, type="primary"):
             puzzle = generate_sudoku(9, demo_difficulty)
             solve_env = SudokuEnv(9)
             solve_env.reset(puzzle)
@@ -1298,7 +1298,7 @@ if 'human_env' in st.session_state and st.session_state.get('human_active'):
                     st.error("Can't modify initial numbers!")
         
         with col_b:
-            if st.button("🤖 Get Hint", use_container_width=True):
+            if st.button(" Get Hint", use_container_width=True):
                 if agent is not None:
                     hint_move = agent.choose_action(h_env, training=False)
                     if hint_move:
