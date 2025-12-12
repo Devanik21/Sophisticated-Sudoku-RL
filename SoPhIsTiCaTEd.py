@@ -855,6 +855,7 @@ if st.session_state.get('solving_active') and 'current_puzzle' in st.session_sta
         if st.button("Solve Another"):
             del st.session_state.solve_env
             del st.session_state.solve_moves
+            st.session_state.solving_active = False
             st.session_state.current_puzzle = generate_sudoku(grid_size, difficulty)
             st.rerun()
 
