@@ -368,7 +368,7 @@ class SudokuAgent:
         # DQN Q-Learning component
         self.q_table = {}
         
-        # Experience Replay
+        # Experience Replay - Initialize first to avoid AttributeError
         self.replay_buffer = ReplayBuffer(capacity=10000)
         self.batch_size = 32
         
@@ -380,7 +380,7 @@ class SudokuAgent:
         # Policy network (simulated via heuristics)
         self.policy_table = defaultdict(lambda: defaultdict(float))
         
-        # Self-attention patterns (learned patterns)
+        # Self-attention patterns (learned patterns) - Initialize as defaultdict
         self.attention_patterns = defaultdict(float)
         
         # Stats
@@ -692,7 +692,7 @@ def generate_sudoku_puzzle(difficulty='easy'):
 # Training System
 # ============================================================================
 
-def train_agent(agent, num_episodes, difficulty='easy'):
+def train_agent(agent, num_episodes, difficulty='easy', update_freq=10, status_placeholder=None, progress_bar=None):
     """Train agent on multiple puzzles"""
     history = {
         'solved': [],
@@ -740,13 +740,34 @@ def train_agent(agent, num_episodes, difficulty='easy'):
         agent.total_moves += moves_made
         agent.decay_epsilon()
         
-        # Record history
-        history['solved'].append(agent.puzzles_solved)
-        history['failed'].append(agent.puzzles_failed)
-        history['avg_moves'].append(moves_made)
-        history['epsilon'].append(agent.epsilon)
-        history['q_values'].append(len(agent.q_table))
-        history['episode'].append(ep)
+        # Record history at specified frequency
+        if ep % update_freq == 0:
+            history['solved'].append(agent.puzzles_solved)
+            history['failed'].append(agent.puzzles_failed)
+            history['avg_moves'].append(moves_made)
+            history['epsilon'].append(agent.epsilon)
+            history['q_values'].append(len(agent.q_table))
+            history['episode'].append(ep)
+            
+            # Update UI if placeholders provided
+            if progress_bar is not None:
+                progress_bar.progress(ep / num_episodes)
+            
+            if status_placeholder is not None:
+                status_placeholder.markdown(f"""
+                ### 📊 Training Progress
+                
+                | Metric | Value |
+                |:-------|------:|
+                | **Episode** | {ep}/{num_episodes} ({ep/num_episodes*100:.1f}%) |
+                | **Puzzles Solved** | {agent.puzzles_solved} |
+                | **Puzzles Failed** | {agent.puzzles_failed} |
+                | **Success Rate** | {agent.puzzles_solved/(agent.puzzles_solved+agent.puzzles_failed)*100:.1f}% |
+                | **Epsilon** | {agent.epsilon:.4f} |
+                | **Q-Table Size** | {len(agent.q_table):,} states |
+                | **Policy Table Size** | {len(agent.policy_table):,} states |
+                | **Replay Buffer** | {len(agent.replay_buffer)}/{agent.replay_buffer.buffer.maxlen} |
+                """)
     
     return history
 
@@ -884,6 +905,10 @@ def load_agent_from_zip(uploaded_file):
             agent.total_moves = int(data.get('total_moves', 0))
             agent.mcts_simulations = int(data.get('mcts_sims', 100))
             
+            # Ensure replay buffer exists (create new one since we can't serialize it)
+            if not hasattr(agent, 'replay_buffer'):
+                agent.replay_buffer = ReplayBuffer(capacity=10000)
+            
             # Restore policy table
             agent.policy_table = defaultdict(lambda: defaultdict(float))
             loaded_count = 0
@@ -941,17 +966,45 @@ with st.sidebar.expander("1. Agent Hyperparameters", expanded=True):
     minimax_depth = st.slider("Minimax Depth", 1, 5, 3, 1)
 
 with st.sidebar.expander("2. Training Configuration", expanded=True):
-    episodes = st.number_input("Training Episodes", 10, 1000, 100, 10)
+    episodes = st.number_input("Training Episodes", 10, 10000, 100, 10)
     difficulty = st.selectbox("Puzzle Difficulty", 
                              ['easy', 'medium', 'hard', 'expert'])
+    update_freq = st.number_input("Update Dashboard Every N Episodes", 
+                                  min_value=1, max_value=100, value=10, step=1,
+                                  help="How often to update charts during training")
 
-with st.sidebar.expander("3. Brain Storage", expanded=False):
+with st.sidebar.expander("3. Puzzle Generator", expanded=True):
+    st.markdown("### 🎲 Generate Custom Puzzle")
+    
+    grid_size = st.selectbox("Grid Size", 
+                            ['9x9 (Classic)', '4x4 (Mini)', '16x16 (Mega)'],
+                            key='grid_size',
+                            disabled=True,
+                            help="Currently only 9x9 is supported. Other sizes coming soon!")
+    
+    gen_difficulty = st.selectbox("Generation Difficulty", 
+                                  ['easy', 'medium', 'hard', 'expert'],
+                                  key='gen_diff')
+    
+    if st.button("🎲 Generate New Puzzle", use_container_width=True, type="primary"):
+        puzzle = generate_sudoku_puzzle(gen_difficulty)
+        st.session_state.generated_puzzle = puzzle
+        st.session_state.generated_puzzle_env = Sudoku()
+        st.session_state.generated_puzzle_env.reset(puzzle)
+        st.session_state.puzzle_difficulty = gen_difficulty
+        st.toast(f"✨ Generated {gen_difficulty} puzzle!", icon="🎲")
+        st.rerun()
+    
+    st.caption("💡 Tip: Generated puzzles can be played or solved by AI!")
+
+with st.sidebar.expander("4. Brain Storage", expanded=False):
     if 'agent' in st.session_state and st.session_state.agent is not None:
         config = {
             "lr": lr,
             "gamma": gamma,
             "mcts_sims": mcts_sims,
             "minimax_depth": minimax_depth,
+            "update_freq": update_freq,
             "training_history": st.session_state.get('training_history', None)
         }
         
@@ -1026,6 +1079,81 @@ with col4:
 
 st.markdown("---")
 
+# Display generated puzzle
+if 'generated_puzzle' in st.session_state:
+    st.subheader("🎲 Your Generated Puzzle")
+    
+    gen_col1, gen_col2, gen_col3 = st.columns([2, 1, 1])
+    
+    with gen_col1:
+        puzzle_difficulty = st.session_state.get('puzzle_difficulty', 'medium')
+        fig = visualize_sudoku(st.session_state.generated_puzzle_env.board, 
+                              st.session_state.generated_puzzle_env.initial_board,
+                              f"Generated Puzzle ({puzzle_difficulty.capitalize()})")
+        st.pyplot(fig)
+        plt.close(fig)
+    
+    with gen_col2:
+        empty_cells = np.sum(st.session_state.generated_puzzle == 0)
+        st.metric("Empty Cells", empty_cells)
+        st.metric("Filled Cells", 81 - empty_cells)
+    
+    with gen_col3:
+        if st.button("🤖 Solve This", use_container_width=True):
+            if agent is not None:
+                st.session_state.solve_puzzle = st.session_state.generated_puzzle.copy()
+                st.session_state.solving_active = True
+                # Automatically generate solution for this puzzle
+                solve_env = Sudoku()
+                solve_env.reset(st.session_state.generated_puzzle.copy())
+                
+                all_moves = []
+                all_boards = [solve_env.board.copy()]
+                
+                move_count = 0
+                max_moves = 100
+                
+                with st.spinner("🧠 AI is solving..."):
+                    while (not solve_env.solved and not solve_env.has_contradiction() 
+                           and move_count < max_moves):
+                        move = agent.choose_action(solve_env, training=False)
+                        if move is None:
+                            break
+                        solve_env.make_move(move)
+                        all_moves.append(move)
+                        all_boards.append(solve_env.board.copy())
+                        move_count += 1
+                
+                st.session_state.solve_moves = all_moves
+                st.session_state.solve_boards = all_boards
+                st.session_state.solve_initial = st.session_state.generated_puzzle.copy()
+                st.session_state.solve_success = solve_env.is_solved()
+                st.session_state.current_move_index = 0
+                st.toast(f"✅ Generated {len(all_moves)} moves!", icon="🎬")
+                st.rerun()
+        
+        if st.button("🎮 Play This", use_container_width=True):
+            st.session_state.human_env = Sudoku()
+            st.session_state.human_env.reset(st.session_state.generated_puzzle.copy())
+            st.session_state.human_active = True
+            st.rerun()
+        
+        if st.button("📋 Copy Puzzle", use_container_width=True):
+            puzzle_str = '\n'.join([' '.join([str(cell) if cell != 0 else '.' 
+                                             for cell in row]) 
+                                   for row in st.session_state.generated_puzzle])
+            st.code(puzzle_str, language=None)
+            st.caption("Copy this text to share!")
+        
+        if st.button("🗑️ Clear", use_container_width=True):
+            del st.session_state.generated_puzzle
+            del st.session_state.generated_puzzle_env
+            if 'puzzle_difficulty' in st.session_state:
+                del st.session_state.puzzle_difficulty
+            st.rerun()
+    
+    st.markdown("---")
+
 # Training
 if train_button:
     st.subheader("🎯 Training in Progress")
@@ -1035,11 +1163,15 @@ if train_button:
     
     agent.reset_stats()
     
-    history = train_agent(agent, episodes, difficulty)
+    history = train_agent(agent, episodes, difficulty, update_freq, status, progress_bar)
     
     progress_bar.progress(1.0)
+    status.success("✅ Training Complete!")
     st.toast("Training Complete! 🎉", icon="✨")
     st.session_state.training_history = history
+    
+    import time
+    time.sleep(2)
     st.rerun()
 
 # Display training charts
@@ -1074,62 +1206,210 @@ if 'training_history' in st.session_state and st.session_state.training_history:
             chart_data = df[['episode', 'q_values']].set_index('episode')
             st.line_chart(chart_data)
 
-# Demo solving
+# AI Solving with Manual Controls
 if 'agent' in st.session_state and st.session_state.agent is not None and len(getattr(st.session_state.agent, 'policy_table', {})) > 10:
     st.markdown("---")
-    st.subheader("🎬 Watch AI Solve Sudoku")
+    st.subheader("🎬 Watch AI Solve Sudoku (Step-by-Step)")
     
-    demo_col1, demo_col2 = st.columns([1, 2])
+    demo_col1, demo_col2 = st.columns([1, 3])
     
     with demo_col1:
+        st.markdown("### 🎮 Controls")
         demo_difficulty = st.selectbox("Select Difficulty", 
                                        ['easy', 'medium', 'hard', 'expert'],
                                        key='demo_diff')
         
-        if st.button("🎯 Solve Puzzle", use_container_width=True):
+        if st.button("🤖 Generate AI Solution", use_container_width=True, type="primary"):
+            # Generate puzzle
             puzzle = generate_sudoku_puzzle(demo_difficulty)
-            st.session_state.demo_env = Sudoku()
-            st.session_state.demo_env.reset(puzzle)
-            st.session_state.demo_active = True
-            st.rerun()
-    
-    with demo_col2:
-        if 'demo_env' in st.session_state and st.session_state.get('demo_active'):
-            demo_env = st.session_state.demo_env
+            solve_env = Sudoku()
+            solve_env.reset(puzzle)
             
-            board_placeholder = st.empty()
-            status_text = st.empty()
+            # Record all moves
+            all_moves = []
+            all_boards = [solve_env.board.copy()]
             
             move_count = 0
             max_moves = 100
             
-            with st.spinner("🧠 Solving..."):
-                while (not demo_env.solved and not demo_env.has_contradiction() 
+            with st.spinner("🧠 AI is solving..."):
+                while (not solve_env.solved and not solve_env.has_contradiction() 
                        and move_count < max_moves):
-                    move = agent.choose_action(demo_env, training=False)
+                    move = agent.choose_action(solve_env, training=False)
                     
                     if move is None:
                         break
                     
-                    demo_env.make_move(move)
+                    solve_env.make_move(move)
+                    all_moves.append(move)
+                    all_boards.append(solve_env.board.copy())
                     move_count += 1
-                    
-                    status_text.caption(f"Move {move_count}: Placed {move.value} at ({move.row}, {move.col})")
-                    
-                    fig = visualize_sudoku(demo_env.board, demo_env.initial_board,
-                                          f"Solving... ({move_count} moves)")
-                    board_placeholder.pyplot(fig)
-                    plt.close(fig)
-                    
-                    import time
-                    time.sleep(0.3)
             
-            if demo_env.is_solved():
-                st.success(f"🎉 Solved in {move_count} moves!")
-            else:
-                st.error("Failed to solve")
+            # Store in session state
+            st.session_state.solve_moves = all_moves
+            st.session_state.solve_boards = all_boards
+            st.session_state.solve_initial = puzzle
+            st.session_state.solve_success = solve_env.is_solved()
+            st.session_state.current_move_index = 0
+            st.toast(f"✅ Generated {len(all_moves)} moves!", icon="🎬")
+            st.rerun()
+    
+    with demo_col2:
+        if 'solve_boards' in st.session_state:
+            st.markdown("### 📺 Solution Playback")
             
-            st.session_state.demo_active = False
+            # Navigation controls
+            nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns(5)
+            
+            current_idx = st.session_state.get('current_move_index', 0)
+            total_moves = len(st.session_state.solve_moves)
+            
+            with nav_col1:
+                if st.button("⏮️ Start", use_container_width=True):
+                    st.session_state.current_move_index = 0
+                    st.rerun()
+            
+            with nav_col2:
+                if st.button("◀️ Prev", use_container_width=True):
+                    if current_idx > 0:
+                        st.session_state.current_move_index = current_idx - 1
+                        st.rerun()
+            
+            with nav_col3:
+                st.markdown(f"<div style='text-align: center; padding: 8px; background: #1f1f1f; border-radius: 5px;'><b>{current_idx}/{total_moves}</b></div>", unsafe_allow_html=True)
+            
+            with nav_col4:
+                if st.button("▶️ Next", use_container_width=True):
+                    if current_idx < total_moves:
+                        st.session_state.current_move_index = current_idx + 1
+                        st.rerun()
+            
+            with nav_col5:
+                if st.button("⏭️ End", use_container_width=True):
+                    st.session_state.current_move_index = total_moves
+                    st.rerun()
+            
+            # Progress bar
+            progress = current_idx / total_moves if total_moves > 0 else 0
+            st.progress(progress)
+            
+            # Display current board state
+            current_board = st.session_state.solve_boards[current_idx]
+            
+            # Move info and stats
+            info_col1, info_col2 = st.columns([2, 1])
+            
+            with info_col1:
+                if current_idx > 0:
+                    last_move = st.session_state.solve_moves[current_idx - 1]
+                    move_info = f"Move {current_idx}: Placed **{last_move.value}** at position **({last_move.row}, {last_move.col})**"
+                else:
+                    move_info = "Initial puzzle state"
+                
+                st.info(move_info)
+            
+            with info_col2:
+                empty_cells = np.sum(current_board == 0)
+                st.metric("Remaining Cells", empty_cells, 
+                         delta=-(81 - empty_cells) if current_idx == 0 else None)
+            
+            # Visualize board
+            fig = visualize_sudoku(current_board, 
+                                  st.session_state.solve_initial,
+                                  f"Step {current_idx}/{total_moves}")
+            st.pyplot(fig)
+            plt.close(fig)
+            
+            # Status
+            if current_idx == total_moves:
+                if st.session_state.solve_success:
+                    st.success("🎉 Puzzle Solved Successfully!")
+                    
+                    # Solution statistics
+                    st.markdown("### 📊 Solution Statistics")
+                    stat_col1, stat_col2, stat_col3 = st.columns(3)
+                    with stat_col1:
+                        st.metric("Total Moves", total_moves)
+                    with stat_col2:
+                        efficiency = (81 - np.sum(st.session_state.solve_initial == 0)) / total_moves * 100
+                        st.metric("Efficiency", f"{efficiency:.1f}%")
+                    with stat_col3:
+                        st.metric("Initial Empty", np.sum(st.session_state.solve_initial == 0))
+                else:
+                    st.error("❌ AI couldn't solve this puzzle")
+                    st.caption("Try training the agent more or using a different difficulty.")
+            
+            # Auto-play controls
+            st.markdown("---")
+            st.markdown("### ⚙️ Playback Controls")
+            
+            autoplay_col1, autoplay_col2, autoplay_col3, autoplay_col4 = st.columns([1, 1, 1, 1])
+            
+            with autoplay_col1:
+                autoplay_speed = st.slider("Speed (sec)", 
+                                          min_value=0.5, max_value=5.0, 
+                                          value=1.0, step=0.5,
+                                          key='autoplay_speed')
+            
+            with autoplay_col2:
+                if not st.session_state.get('autoplay', False):
+                    if st.button("▶️ Play", use_container_width=True):
+                        st.session_state.autoplay = True
+                        st.rerun()
+                else:
+                    if st.button("⏸️ Pause", use_container_width=True):
+                        st.session_state.autoplay = False
+                        st.rerun()
+            
+            with autoplay_col3:
+                if st.button("🔄 Reset", use_container_width=True):
+                    st.session_state.current_move_index = 0
+                    st.session_state.autoplay = False
+                    st.rerun()
+            
+            with autoplay_col4:
+                # Export solution
+                solution_data = {
+                    "puzzle": st.session_state.solve_initial.tolist(),
+                    "moves": [{"row": m.row, "col": m.col, "value": m.value} 
+                             for m in st.session_state.solve_moves],
+                    "total_moves": len(st.session_state.solve_moves),
+                    "success": st.session_state.solve_success
+                }
+                st.download_button(
+                    "💾 Export",
+                    data=json.dumps(solution_data, indent=2),
+                    file_name="sudoku_solution.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            # Auto-play functionality
+            if st.session_state.get('autoplay', False) and current_idx < total_moves:
+                import time
+                time.sleep(st.session_state.get('autoplay_speed', 1.0))
+                st.session_state.current_move_index = current_idx + 1
+                if current_idx + 1 >= total_moves:
+                    st.session_state.autoplay = False
+                st.rerun()
+        else:
+            st.info("👈 Click 'Generate AI Solution' to watch the AI solve a puzzle step-by-step!")
+            st.markdown("""
+            **Features:**
+            - ⏮️ **Start**: Jump to initial state
+            - ◀️ **Prev**: Go back one move
+            - ▶️ **Next**: Advance one move  
+            - ⏭️ **End**: Jump to final state
+            - ▶️ **Auto-Play**: Watch solution automatically
+            - 🎚️ **Speed Control**: Adjust playback speed
+            
+            Perfect for:
+            - 📚 Learning Sudoku strategies
+            - 🔍 Understanding AI decision-making
+            - 🎓 Teaching constraint propagation
+            """)
+
+# Old demo solving section removed
 
 # Human playable mode
 st.markdown("---")
