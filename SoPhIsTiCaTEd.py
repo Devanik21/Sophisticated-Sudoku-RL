@@ -399,6 +399,10 @@ class SudokuAgent:
         moves = game.get_valid_moves()
         priors = {}
         
+        # Ensure attention_patterns exists
+        if not hasattr(self, 'attention_patterns'):
+            self.attention_patterns = defaultdict(float)
+        
         for move in moves:
             # Use learned policy if available
             if state in self.policy_table and move in self.policy_table[state]:
@@ -592,6 +596,9 @@ class SudokuAgent:
     
     def update_attention_patterns(self, game, success):
         """Update self-attention patterns based on game outcome"""
+        if not hasattr(self, 'attention_patterns'):
+            self.attention_patterns = defaultdict(float)
+        
         for move in game.move_history:
             pattern_key = (move.row // 3, move.col // 3, move.value)
             if success:
@@ -825,16 +832,24 @@ def create_agent_zip(agent, config):
             except:
                 continue
         
+        # Safe attribute access with defaults
+        attention_patterns = {}
+        if hasattr(agent, 'attention_patterns'):
+            try:
+                attention_patterns = {str(k): float(v) for k, v in agent.attention_patterns.items()}
+            except:
+                attention_patterns = {}
+        
         return {
             "metadata": {"version": "1.0"},
             "policy_table": clean_policy,
             "q_table": clean_q_table,
-            "attention_patterns": {str(k): float(v) for k, v in agent.attention_patterns.items()},
+            "attention_patterns": attention_patterns,
             "epsilon": float(agent.epsilon),
-            "puzzles_solved": int(agent.puzzles_solved),
-            "puzzles_failed": int(agent.puzzles_failed),
-            "total_moves": int(agent.total_moves),
-            "mcts_sims": int(agent.mcts_simulations)
+            "puzzles_solved": int(getattr(agent, 'puzzles_solved', 0)),
+            "puzzles_failed": int(getattr(agent, 'puzzles_failed', 0)),
+            "total_moves": int(getattr(agent, 'total_moves', 0)),
+            "mcts_sims": int(getattr(agent, 'mcts_simulations', 100))
         }
     
     data = serialize_agent(agent)
@@ -853,18 +868,21 @@ def load_agent_from_zip(uploaded_file):
         with zipfile.ZipFile(uploaded_file, "r") as zf:
             files = zf.namelist()
             if "agent.json" not in files:
+                st.error("❌ Invalid file: missing agent.json")
                 return None, None, 0
             
             data = json.loads(zf.read("agent.json").decode('utf-8'))
-            config = json.loads(zf.read("config.json").decode('utf-8'))
+            config = json.loads(zf.read("config.json").decode('utf-8')) if "config.json" in files else {}
             
+            # Create new agent with proper initialization
             agent = SudokuAgent(config.get('lr', 0.3), config.get('gamma', 0.95))
             
-            agent.epsilon = data.get('epsilon', 0.1)
-            agent.puzzles_solved = data.get('puzzles_solved', 0)
-            agent.puzzles_failed = data.get('puzzles_failed', 0)
-            agent.total_moves = data.get('total_moves', 0)
-            agent.mcts_simulations = data.get('mcts_sims', 100)
+            # Restore basic attributes safely
+            agent.epsilon = float(data.get('epsilon', 0.1))
+            agent.puzzles_solved = int(data.get('puzzles_solved', 0))
+            agent.puzzles_failed = int(data.get('puzzles_failed', 0))
+            agent.total_moves = int(data.get('total_moves', 0))
+            agent.mcts_simulations = int(data.get('mcts_sims', 100))
             
             # Restore policy table
             agent.policy_table = defaultdict(lambda: defaultdict(float))
@@ -877,12 +895,13 @@ def load_agent_from_zip(uploaded_file):
                     for move_json_str, value in moves_dict.items():
                         move_dict = json.loads(move_json_str)
                         move = deserialize_move(move_dict)
-                        agent.policy_table[state][move] = value
+                        agent.policy_table[state][move] = float(value)
                     loaded_count += 1
-                except:
+                except Exception as e:
                     continue
             
             # Restore Q-table
+            agent.q_table = {}
             for state_str, actions_dict in data.get('q_table', {}).items():
                 try:
                     state = ast.literal_eval(state_str)
@@ -890,22 +909,23 @@ def load_agent_from_zip(uploaded_file):
                     for move_json_str, value in actions_dict.items():
                         move_dict = json.loads(move_json_str)
                         move = deserialize_move(move_dict)
-                        agent.q_table[state][move] = value
+                        agent.q_table[state][move] = float(value)
                     loaded_count += 1
-                except:
+                except Exception as e:
                     continue
             
             # Restore attention patterns
+            agent.attention_patterns = defaultdict(float)
             for key_str, value in data.get('attention_patterns', {}).items():
                 try:
                     key = ast.literal_eval(key_str)
-                    agent.attention_patterns[key] = value
-                except:
+                    agent.attention_patterns[key] = float(value)
+                except Exception as e:
                     continue
             
             return agent, config, loaded_count
     except Exception as e:
-        st.error(f"Error loading: {str(e)}")
+        st.error(f"❌ Error loading brain: {str(e)}")
         return None, None, 0
 
 # ============================================================================
@@ -926,7 +946,7 @@ with st.sidebar.expander("2. Training Configuration", expanded=True):
                              ['easy', 'medium', 'hard', 'expert'])
 
 with st.sidebar.expander("3. Brain Storage", expanded=False):
-    if 'agent' in st.session_state and st.session_state.agent:
+    if 'agent' in st.session_state and st.session_state.agent is not None:
         config = {
             "lr": lr,
             "gamma": gamma,
@@ -935,14 +955,17 @@ with st.sidebar.expander("3. Brain Storage", expanded=False):
             "training_history": st.session_state.get('training_history', None)
         }
         
-        zip_buffer = create_agent_zip(st.session_state.agent, config)
-        st.download_button(
-            label="💾 Download Brain",
-            data=zip_buffer,
-            file_name="sudoku_agent.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
+        try:
+            zip_buffer = create_agent_zip(st.session_state.agent, config)
+            st.download_button(
+                label="💾 Download Brain",
+                data=zip_buffer,
+                file_name="sudoku_agent.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+        except Exception as e:
+            st.error(f"Error creating download: {str(e)}")
     else:
         st.info("Train agent first")
     
@@ -967,36 +990,39 @@ if st.sidebar.button("🧹 Reset Everything", use_container_width=True):
     st.rerun()
 
 # Initialize agent
-if 'agent' not in st.session_state:
+if 'agent' not in st.session_state or st.session_state.agent is None:
     st.session_state.agent = SudokuAgent(lr, gamma)
     st.session_state.agent.mcts_simulations = mcts_sims
     st.session_state.agent.minimax_depth = minimax_depth
 
 agent = st.session_state.agent
-agent.mcts_simulations = mcts_sims
-agent.minimax_depth = minimax_depth
+
+# Update parameters safely
+if agent is not None:
+    agent.mcts_simulations = mcts_sims
+    agent.minimax_depth = minimax_depth
 
 # Display stats
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.metric("🧠 Neural Network", 
-             f"{len(agent.policy_table)} states")
-    st.caption(f"ε={agent.epsilon:.4f}")
+             f"{len(getattr(agent, 'policy_table', {})) if agent else 0} states")
+    st.caption(f"ε={getattr(agent, 'epsilon', 0):.4f}")
 
 with col2:
     st.metric("♾️ DQN Q-Values", 
-             f"{len(agent.q_table)} states")
-    st.caption(f"Replay: {len(agent.replay_buffer)}")
+             f"{len(getattr(agent, 'q_table', {})) if agent else 0} states")
+    st.caption(f"Replay: {len(getattr(agent, 'replay_buffer', [])) if agent else 0}")
 
 with col3:
-    st.metric("✅ Puzzles Solved", agent.puzzles_solved)
-    st.caption(f"Failed: {agent.puzzles_failed}")
+    st.metric("✅ Puzzles Solved", getattr(agent, 'puzzles_solved', 0) if agent else 0)
+    st.caption(f"Failed: {getattr(agent, 'puzzles_failed', 0) if agent else 0}")
 
 with col4:
     st.metric("🎯 Attention Patterns", 
-             len(agent.attention_patterns))
-    st.caption(f"MCTS Sims: {agent.mcts_simulations}")
+             len(getattr(agent, 'attention_patterns', {})) if agent else 0)
+    st.caption(f"MCTS Sims: {getattr(agent, 'mcts_simulations', 0) if agent else 0}")
 
 st.markdown("---")
 
@@ -1049,7 +1075,7 @@ if 'training_history' in st.session_state and st.session_state.training_history:
             st.line_chart(chart_data)
 
 # Demo solving
-if 'agent' in st.session_state and len(agent.policy_table) > 10:
+if 'agent' in st.session_state and st.session_state.agent is not None and len(getattr(st.session_state.agent, 'policy_table', {})) > 10:
     st.markdown("---")
     st.subheader("🎬 Watch AI Solve Sudoku")
     
@@ -1156,9 +1182,12 @@ if 'human_env' in st.session_state and st.session_state.get('human_active'):
         
         with col_b:
             if st.button("🤖 Get Hint", use_container_width=True):
-                hint_move = agent.choose_action(h_env, training=False)
-                if hint_move:
-                    st.info(f"💡 Try placing {hint_move.value} at ({hint_move.row}, {hint_move.col})")
+                if agent is not None:
+                    hint_move = agent.choose_action(h_env, training=False)
+                    if hint_move:
+                        st.info(f"💡 Try placing {hint_move.value} at ({hint_move.row}, {hint_move.col})")
+                else:
+                    st.warning("Train agent first to get hints!")
         
         with col_c:
             if st.button("🔄 Reset", use_container_width=True):
