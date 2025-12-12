@@ -919,32 +919,33 @@ if train_button:
     st.rerun()
 
 # Display training charts
+# Display training charts
 if 'training_history' in st.session_state and st.session_state.training_history:
     history = st.session_state.training_history
     
     if isinstance(history, dict) and 'episode' in history and len(history['episode']) > 0:
-        st.subheader("📊 Training Analytics")
-        df = pd.DataFrame(history)
-        
-        chart_col1, chart_col2 = st.columns(2)
-        
-        with chart_col1:
-            st.write("#### Success Rate")
-            if all(col in df.columns for col in ['episode', 'solved', 'failed']):
-                chart_data = df[['episode', 'solved', 'failed']].set_index('episode')
-                st.line_chart(chart_data, color=["#00CC00", "#FF4444"])
-        
-        with chart_col2:
-            st.write("#### Exploration Rate (Epsilon)")
-            if 'epsilon' in df.columns:
-                chart_data = df[['episode', 'epsilon']].set_index('episode')
+        # UPDATED: Wrapped in an expander for lazy loading/cleaner UI
+        with st.expander("📊 Training Analytics", expanded=False):
+            df = pd.DataFrame(history)
+            
+            chart_col1, chart_col2 = st.columns(2)
+            
+            with chart_col1:
+                st.write("#### Success Rate")
+                if all(col in df.columns for col in ['episode', 'solved', 'failed']):
+                    chart_data = df[['episode', 'solved', 'failed']].set_index('episode')
+                    st.line_chart(chart_data, color=["#00CC00", "#FF4444"])
+            
+            with chart_col2:
+                st.write("#### Exploration Rate (Epsilon)")
+                if 'epsilon' in df.columns:
+                    chart_data = df[['episode', 'epsilon']].set_index('episode')
+                    st.line_chart(chart_data)
+            
+            st.write("#### Average Moves per Puzzle")
+            if 'avg_moves' in df.columns:
+                chart_data = df[['episode', 'avg_moves']].set_index('episode')
                 st.line_chart(chart_data)
-        
-        st.write("#### Average Moves per Puzzle")
-        if 'avg_moves' in df.columns:
-            chart_data = df[['episode', 'avg_moves']].set_index('episode')
-            st.line_chart(chart_data)
-
 # AI Solving with Manual Controls
 # AI Solving with Manual Controls
 # UPDATED: Removed the 'len > 10' check so the section is always visible for you
