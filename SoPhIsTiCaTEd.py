@@ -169,36 +169,56 @@ class SudokuEnv:
         return moves
     
     def make_move(self, row, col, num):
-        """Make move and return reward, done"""
+        """Make move with SMART REWARD SHAPING"""
         if self.initial_board[row, col] != 0:
-            return -10, False
+            return -10, False # Penalty for overwriting fixed cells
         
         if not self.is_valid_move(row, col, num):
-            return -5, False
+            return -5, False # Penalty for breaking rules
         
+        # Calculate how "smart" this move was before making it
+        initial_candidates = 0
+        for r in range(self.grid_size):
+            for c in range(self.grid_size):
+                if self.board[r, c] == 0:
+                    initial_candidates += len(self.get_candidates(r, c))
+
         self.board[row, col] = num
         self.move_count += 1
         
-        # Calculate reward
-        reward = 1
-        
-        # Bonus for constraint strength
-        candidates_reduced = 0
-        for r, c in [(row, i) for i in range(self.grid_size)] + \
-                    [(i, col) for i in range(self.grid_size)]:
-            if self.board[r, c] == 0:
-                candidates_reduced += 1
-        
-        reward += candidates_reduced * 0.1
-        
         # Check if solved
         if self.is_solved():
-            return 100, True
-        
-        # Check if stuck
+            return 100, True # JACKPOT!
+            
+        # Check if stuck (no moves left but not solved)
         if not self.get_valid_moves():
-            return -20, True
+            return -10, True # Dead end
         
+        # --- REWARD SHAPING ---
+        # Calculate new candidates after move
+        final_candidates = 0
+        naked_singles_found = 0
+        for r in range(self.grid_size):
+            for c in range(self.grid_size):
+                if self.board[r, c] == 0:
+                    cands = len(self.get_candidates(r, c))
+                    final_candidates += cands
+                    if cands == 1:
+                        naked_singles_found += 1
+        
+        # Reward 1: Basic step
+        reward = 0.5 
+        
+        # Reward 2: Logic Bonus (Did we constrain the board?)
+        # If we reduced total candidates heavily, it was a good move
+        reduction = initial_candidates - final_candidates
+        reward += reduction * 0.05
+        
+        # Reward 3: Hunter Bonus (Did we reveal a naked single?)
+        # This teaches the AI to set up easy next moves!
+        if naked_singles_found > 0:
+            reward += 2.0 
+            
         return reward, False
     
     def is_solved(self):
@@ -343,52 +363,76 @@ class PrioritizedReplayBuffer:
 # ============================================================================
 
 class SimpleNeuralNet:
-    """A NumPy-only Neural Network for value estimation"""
-    def __init__(self, input_size, hidden_size=128):
-        # He initialization for better convergence
+    """A Smarter NumPy Neural Network with 2 Hidden Layers & Leaky ReLU"""
+    def __init__(self, input_size, hidden_size=256):
+        # Increased hidden_size to 256 for more brain power
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        
+        # He initialization
         self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2/input_size)
         self.b1 = np.zeros(hidden_size)
-        self.W2 = np.random.randn(hidden_size, 1) * np.sqrt(2/hidden_size)
-        self.b2 = np.zeros(1)
-        self.loss_history = []
         
+        # Second hidden layer (The Upgrade!)
+        self.W2 = np.random.randn(hidden_size, hidden_size) * np.sqrt(2/hidden_size)
+        self.b2 = np.zeros(hidden_size)
+        
+        self.W3 = np.random.randn(hidden_size, 1) * np.sqrt(2/hidden_size)
+        self.b3 = np.zeros(1)
+        
+        self.loss_history = []
+        self.lr_decay = 0.999 # Slow down learning as we get smarter
+        
+    def leaky_relu(self, x, alpha=0.01):
+        return np.maximum(alpha * x, x)
+        
+    def leaky_relu_deriv(self, x, alpha=0.01):
+        dx = np.ones_like(x)
+        dx[x < 0] = alpha
+        return dx
+
     def forward(self, x):
-        # x shape: (batch_size, input_size) or (input_size,)
-        if x.ndim == 1:
-            x = x.reshape(1, -1)
+        if x.ndim == 1: x = x.reshape(1, -1)
             
         self.z1 = np.dot(x, self.W1) + self.b1
-        self.a1 = np.maximum(0, self.z1) # ReLU
+        self.a1 = self.leaky_relu(self.z1)
+        
         self.z2 = np.dot(self.a1, self.W2) + self.b2
-        self.output = np.tanh(self.z2) # Value head: -1 to 1
+        self.a2 = self.leaky_relu(self.z2) # Extra abstraction layer
+        
+        self.z3 = np.dot(self.a2, self.W3) + self.b3
+        self.output = np.tanh(self.z3) 
         return self.output
     
     def train(self, x, target, lr=0.01):
-        # Forward pass
+        m = x.shape[0]
         output = self.forward(x)
-        
-        # Error calculation (MSE)
         error = output - target
         loss = np.mean(error**2)
         self.loss_history.append(loss)
         
-        # Backpropagation
-        # Output layer gradients
-        m = x.shape[0]
-        delta2 = error * (1 - output**2) # Derivative of tanh
+        # Backprop through Layer 3
+        delta3 = error * (1 - output**2)
+        dW3 = np.dot(self.a2.T, delta3) / m
+        db3 = np.sum(delta3, axis=0) / m
+        
+        # Backprop through Layer 2
+        delta2 = np.dot(delta3, self.W3.T) * self.leaky_relu_deriv(self.z2)
         dW2 = np.dot(self.a1.T, delta2) / m
         db2 = np.sum(delta2, axis=0) / m
         
-        # Hidden layer gradients
-        delta1 = np.dot(delta2, self.W2.T) * (self.a1 > 0) # Derivative of ReLU
+        # Backprop through Layer 1
+        delta1 = np.dot(delta2, self.W2.T) * self.leaky_relu_deriv(self.z1)
         dW1 = np.dot(x.T, delta1) / m
         db1 = np.sum(delta1, axis=0) / m
         
-        # Weight updates
+        # Update
         self.W1 -= lr * dW1
         self.b1 -= lr * db1
         self.W2 -= lr * dW2
         self.b2 -= lr * db2
+        self.W3 -= lr * dW3
+        self.b3 -= lr * db3
         
         return loss
 
@@ -962,40 +1006,70 @@ if train_button:
         'episode': []
     }
     
+    # ... inside if train_button: ...
+    
+    # CURRICULUM SETUP
+    current_difficulty = 'easy' # Start simple!
+    success_streak = 0
+    
+    st.toast(f"🎓 Starting Curriculum: {current_difficulty.upper()}", icon="🏫")
+
     for ep in range(1, episodes + 1):
-        puzzle = generate_sudoku(9, difficulty)
+        # 1. Generate puzzle based on CURRENT curriculum level
+        puzzle = generate_sudoku(9, current_difficulty)
         env = SudokuEnv(9)
         env.reset(puzzle)
         
         agent.puzzles_attempted += 1
         moves = 0
-        max_moves = 162  # 81 * 2
+        
+        # 2. Dynamic Max Moves (Don't let it flail forever)
+        # Easy puzzles need fewer moves. Hard ones need more.
+        max_moves = 60 if current_difficulty == 'easy' else 100
         
         while not env.is_solved() and moves < max_moves:
             state = env.get_state()
             move = agent.choose_action(env, training=True)
             
             if move is None:
-                break
+                break # No valid moves left
             
             reward, done = env.make_move(*move)
-            next_state = env.get_state()
             
+            # 3. Critical: Learn FASTER by boosting reward for winning
+            if done and reward > 50: # If solved
+                reward *= 2.0 # Amplify the victory signal
+            
+            next_state = env.get_state()
             agent.replay_buffer.add(state, move, reward, next_state, done)
             
-            if len(agent.replay_buffer) >= 32:
-                agent.train_from_experience(32)
+            # Train more often!
+            if len(agent.replay_buffer) >= 64:
+                agent.train_from_experience(64) # Increased batch size
             
             moves += 1
-            
-            if done:
-                break
+            if done: break
         
+        # 4. Curriculum Logic: Level Up?
         if env.is_solved():
             agent.puzzles_solved += 1
+            success_streak += 1
             agent.avg_moves.append(moves)
-        
+            
+            # If solved 3 in a row, LEVEL UP!
+            if success_streak >= 5 and current_difficulty != 'expert':
+                levels = ['easy', 'medium', 'hard', 'expert']
+                curr_idx = levels.index(current_difficulty)
+                current_difficulty = levels[curr_idx + 1]
+                success_streak = 0
+                st.toast(f"🆙 Promoted to {current_difficulty.upper()}!", icon="🔥")
+                agent.epsilon = min(agent.epsilon + 0.2, 0.5) # Re-increase exploration for new difficulty
+        else:
+            success_streak = 0 # Reset streak if failed
+            
         agent.decay_epsilon()
+        
+        # ... (rest of your UI update code) ...
         
         # Update UI
         if ep % update_freq == 0:
