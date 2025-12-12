@@ -1097,7 +1097,7 @@ if 'agent' in st.session_state and st.session_state.agent is not None:
                         st.rerun()
             
             with autoplay_col3:
-                if st.button("🔄 Reset", use_container_width=True,key="human_resetz")):
+                if st.button("🔄 Reset", use_container_width=True,key="human_resetz"):
                     st.session_state.current_move_index = 0
                     st.session_state.autoplay = False
                     st.rerun()
