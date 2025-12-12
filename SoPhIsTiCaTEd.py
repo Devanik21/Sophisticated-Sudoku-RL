@@ -689,6 +689,14 @@ with st.sidebar.expander("4. Brain Storage", expanded=False):
     else:
         st.info("Train agent first")
 
+st.sidebar.markdown("---")
+if st.sidebar.button("🧹 Reset Session", use_container_width=True):
+    # A more robust reset that keeps the agent if it exists
+    for key in list(st.session_state.keys()):
+        if key != 'agent':
+            del st.session_state[key]
+    st.rerun()
+
 # Initialize agent
 if 'agent' not in st.session_state or st.session_state.get('grid_size') != grid_size:
     st.session_state.agent = AlphaZeroSudokuAgent(grid_size, lr, gamma)
@@ -716,24 +724,18 @@ with col3:
 st.markdown("---")
 
 # Main controls
-col_a, col_b, col_c = st.columns(3)
+col1, col2, col3 = st.columns([1,1,1])
 
-with col_a:
+with col1:
     if 'current_puzzle' in st.session_state:
         if st.button("🎯 Solve Current Puzzle", use_container_width=True, type="primary"):
             st.session_state.solving_active = True
             st.session_state.solve_steps = []
             st.rerun()
 
-with col_b:
+with col2:
     if st.button(" Train Agent", use_container_width=True):
         st.session_state.training_active = True
-        st.rerun()
-
-with col_c:
-    if st.button("🧹 Reset", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
         st.rerun()
 
 # Training mode
