@@ -655,6 +655,13 @@ with st.sidebar.expander("1. Puzzle Configuration", expanded=True):
     grid_size = st.select_slider("Grid Size", [4, 9, 16], 9)
     difficulty = st.selectbox("Difficulty", 
                              ["easy", "medium", "hard", "expert"])
+    if st.button("Generate New Puzzle", use_container_width=True):
+        st.session_state.current_puzzle = generate_sudoku(grid_size, difficulty)
+        st.session_state.solving_active = False
+        st.session_state.challenge_active = False
+        st.session_state.solve_env = None
+        st.session_state.solve_moves = []
+        st.rerun()
     
 with st.sidebar.expander("2. Agent Parameters", expanded=True):
     lr = st.slider("Learning Rate α", 0.1, 1.0, 0.3, 0.05)
@@ -712,11 +719,11 @@ st.markdown("---")
 col_a, col_b, col_c = st.columns(3)
 
 with col_a:
-    if st.button("🎯 Generate & Solve New Puzzle", use_container_width=True, type="primary"):
-        st.session_state.current_puzzle = generate_sudoku(grid_size, difficulty)
-        st.session_state.solving_active = True
-        st.session_state.solve_steps = []
-        st.rerun()
+    if 'current_puzzle' in st.session_state:
+        if st.button("🎯 Solve Current Puzzle", use_container_width=True, type="primary"):
+            st.session_state.solving_active = True
+            st.session_state.solve_steps = []
+            st.rerun()
 
 with col_b:
     if st.button(" Train Agent", use_container_width=True):
@@ -790,6 +797,13 @@ if st.session_state.get('training_active'):
     progress_bar.progress(1.0)
     st.success("Training Complete! 🎉")
     st.session_state.training_active = False
+
+# Display current puzzle if it exists but is not being solved
+if 'current_puzzle' in st.session_state and not st.session_state.get('solving_active'):
+    st.subheader("Current Puzzle")
+    fig = visualize_sudoku(st.session_state.current_puzzle, "Ready to Solve")
+    st.pyplot(fig)
+    plt.close(fig)
 
 # Solving mode
 if st.session_state.get('solving_active') and 'current_puzzle' in st.session_state:
