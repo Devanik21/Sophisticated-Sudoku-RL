@@ -834,7 +834,7 @@ with st.sidebar.expander("4. Brain Storage", expanded=False):
     else:
         st.info("Train agent first")
 
-train_button = st.sidebar.button("🚀 Begin Training", 
+train_button = st.sidebar.button(" Begin Training", 
                                  use_container_width=True, type="primary")
 
 if st.sidebar.button("🧹 Reset Everything", use_container_width=True):
