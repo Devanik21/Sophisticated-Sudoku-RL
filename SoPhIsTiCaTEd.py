@@ -336,30 +336,89 @@ class PrioritizedReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
+
+
+# ============================================================================
+# Neural Network (For Pure RL Mode)
+# ============================================================================
+
+class SimpleNeuralNet:
+    """A NumPy-only Neural Network for value estimation"""
+    def __init__(self, input_size, hidden_size=128):
+        # He initialization for better convergence
+        self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2/input_size)
+        self.b1 = np.zeros(hidden_size)
+        self.W2 = np.random.randn(hidden_size, 1) * np.sqrt(2/hidden_size)
+        self.b2 = np.zeros(1)
+        self.loss_history = []
+        
+    def forward(self, x):
+        # x shape: (batch_size, input_size) or (input_size,)
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+            
+        self.z1 = np.dot(x, self.W1) + self.b1
+        self.a1 = np.maximum(0, self.z1) # ReLU
+        self.z2 = np.dot(self.a1, self.W2) + self.b2
+        self.output = np.tanh(self.z2) # Value head: -1 to 1
+        return self.output
+    
+    def train(self, x, target, lr=0.01):
+        # Forward pass
+        output = self.forward(x)
+        
+        # Error calculation (MSE)
+        error = output - target
+        loss = np.mean(error**2)
+        self.loss_history.append(loss)
+        
+        # Backpropagation
+        # Output layer gradients
+        m = x.shape[0]
+        delta2 = error * (1 - output**2) # Derivative of tanh
+        dW2 = np.dot(self.a1.T, delta2) / m
+        db2 = np.sum(delta2, axis=0) / m
+        
+        # Hidden layer gradients
+        delta1 = np.dot(delta2, self.W2.T) * (self.a1 > 0) # Derivative of ReLU
+        dW1 = np.dot(x.T, delta1) / m
+        db1 = np.sum(delta1, axis=0) / m
+        
+        # Weight updates
+        self.W1 -= lr * dW1
+        self.b1 -= lr * db1
+        self.W2 -= lr * dW2
+        self.b2 -= lr * db2
+        
+        return loss
+
 # ============================================================================
 # Fast AlphaZero Agent
 # ============================================================================
 
 class AlphaZeroAgent:
-    def __init__(self, grid_size=9, lr=0.3, gamma=0.95):
+    def __init__(self, grid_size=9, lr=0.1, gamma=0.95, mode='hybrid'):
         self.grid_size = grid_size
         self.lr = lr
         self.gamma = gamma
+        self.mode = mode  # 'hybrid' or 'pure_rl'
+        
         self.epsilon = 1.0
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
         
-        # Q-Learning
-        self.q_table = defaultdict(lambda: defaultdict(float))
-        
-        # Policy network (simulated)
+        # Architecture Components
+        self.q_table = defaultdict(lambda: defaultdict(float)) # For Hybrid
         self.policy_table = defaultdict(lambda: defaultdict(float))
-        
-        # Value network with caching
+        self.replay_buffer = PrioritizedReplayBuffer(5000)
         self.value_cache = {}
         
-        # Experience replay
-        self.replay_buffer = PrioritizedReplayBuffer(5000)
+        # Initialize Brain for Pure RL
+        if self.mode == 'pure_rl':
+            # Input: 81 cells, Hidden: 128 neurons
+            self.brain = SimpleNeuralNet(input_size=grid_size*grid_size, hidden_size=128)
+            # Lower LR for Neural Net stability
+            self.lr = 0.01 
         
         # MCTS parameters
         self.mcts_simulations = 100
@@ -369,12 +428,10 @@ class AlphaZeroAgent:
         self.puzzles_solved = 0
         self.puzzles_attempted = 0
         self.avg_moves = []
-        
-        # Self-attention
         self.attention_weights = defaultdict(float)
     
     def get_policy_priors(self, env):
-        """Smart policy priors using constraint propagation"""
+        """Get priors. In Hybrid, use logic. In Pure RL, rely less on logic."""
         state = env.get_state()
         valid_moves = env.get_valid_moves()
         priors = {}
@@ -382,27 +439,31 @@ class AlphaZeroAgent:
         for move in valid_moves:
             row, col, num = move
             
-            # Check learned policy
+            # Check learned policy first
             if state in self.policy_table and move in self.policy_table[state]:
                 prior = self.policy_table[state][move]
             else:
-                # Heuristic based on constraints
                 prior = 1.0
                 
-                candidates = env.get_candidates(row, col)
+                # In Hybrid mode, we heavily bias towards constraints
+                if self.mode == 'hybrid':
+                    candidates = env.get_candidates(row, col)
+                    if len(candidates) == 1:
+                        prior += 100
+                    elif len(candidates) == 2:
+                        prior += 20
+                    else:
+                        prior += (env.grid_size - len(candidates)) * 3
                 
-                # CRITICAL: Naked singles get huge priority
-                if len(candidates) == 1:
-                    prior += 100
-                elif len(candidates) == 2:
-                    prior += 20
-                else:
-                    # More constrained = better
-                    prior += (env.grid_size - len(candidates)) * 3
+                # In Pure RL, we try to be more neutral initially
+                # allowing the MCTS + Value Network to discover the truth
+                elif self.mode == 'pure_rl':
+                     # Minimal hint to avoid completely random start
+                    candidates = env.get_candidates(row, col)
+                    prior += (env.grid_size - len(candidates)) 
                 
-                # Self-attention pattern bonus
-                attention_key = (tuple(env.board[row]), 
-                               tuple(env.board[:, col]), num)
+                # Self-attention bonus (works for both)
+                attention_key = (tuple(env.board[row]), tuple(env.board[:, col]), num)
                 prior += self.attention_weights.get(attention_key, 0)
             
             priors[move] = max(prior, 0.1)
@@ -427,7 +488,7 @@ class AlphaZeroAgent:
                 policy_priors = self.get_policy_priors(search_env)
                 node.expand(policy_priors)
             
-            # Evaluation (with caching)
+            # Evaluation
             value = self._evaluate_leaf(search_env)
             
             # Backup
@@ -436,22 +497,31 @@ class AlphaZeroAgent:
         return root
     
     def _evaluate_leaf(self, env):
-        """Fast evaluation with caching"""
+        """
+        Evaluate board state. 
+        Hybrid: Uses heuristic formula.
+        Pure RL: Uses Neural Network forward pass.
+        """
         if env.is_solved():
             return 1.0
-        
         if not env.get_valid_moves():
             return -1.0
-        
-        # Check cache
+            
+        # --- PURE RL MODE ---
+        if self.mode == 'pure_rl':
+            # Normalize board: 0-9 -> 0.0-1.0
+            state_input = env.board.flatten().astype(float) / 9.0
+            # Ask the brain
+            return self.brain.forward(state_input)[0][0]
+
+        # --- HYBRID MODE (Legacy) ---
         state = env.get_state()
         if state in self.value_cache:
             return self.value_cache[state]
         
-        # Quick evaluation
         score = env.evaluate_state()
         
-        # Naked singles bonus
+        # Constraint bonuses
         naked_singles = 0
         for row in range(env.grid_size):
             for col in range(env.grid_size):
@@ -462,79 +532,92 @@ class AlphaZeroAgent:
                     elif len(candidates) == 0:
                         score = -10000
                         break
-        
         score += naked_singles * 100
-        
         value = np.tanh(score / 1000)
         
-        # Cache it
         self.value_cache[state] = value
-        
         return value
     
     def choose_action(self, env, training=True):
-        """Hybrid action selection: Constraint propagation first, then MCTS"""
         valid_moves = env.get_valid_moves()
         if not valid_moves:
             return None
         
-        # PRIORITY: Check for naked singles (forced moves)
-        for row in range(env.grid_size):
-            for col in range(env.grid_size):
-                if env.board[row, col] == 0:
-                    candidates = env.get_candidates(row, col)
-                    if len(candidates) == 1:
-                        # Forced move - take it immediately
-                        return (row, col, candidates[0])
+        # HYBRID SHORTCUT: Logic overrides search for naked singles
+        if self.mode == 'hybrid':
+            for row in range(env.grid_size):
+                for col in range(env.grid_size):
+                    if env.board[row, col] == 0:
+                        candidates = env.get_candidates(row, col)
+                        if len(candidates) == 1:
+                            return (row, col, candidates[0])
         
-        # Exploration during training
+        # Exploration
         if training and random.random() < self.epsilon:
             return random.choice(valid_moves)
         
-        # MCTS for complex decisions
+        # MCTS
         root = self.mcts_search(env, self.mcts_simulations)
         
         if not root.children:
             return random.choice(valid_moves)
         
-        # Select best move
-        best_move = max(root.children.items(), 
-                       key=lambda x: x[1].visit_count)[0]
+        best_move = max(root.children.items(), key=lambda x: x[1].visit_count)[0]
         
-        # Store policy
+        # Policy update
         state = env.get_state()
         total_visits = sum(c.visit_count for c in root.children.values())
         for move, child in root.children.items():
             policy_prob = child.visit_count / total_visits
             self.policy_table[state][move] = policy_prob
             
-            # Update attention
+            # Attention update
             row, col, num = move
-            attention_key = (tuple(env.board[row]), 
-                           tuple(env.board[:, col]), num)
+            attention_key = (tuple(env.board[row]), tuple(env.board[:, col]), num)
             self.attention_weights[attention_key] += policy_prob * 0.1
         
         return best_move
     
     def train_from_experience(self, batch_size=32):
-        """DQN training"""
         if len(self.replay_buffer) < batch_size:
             return
         
         batch = self.replay_buffer.sample(batch_size)
         
-        for state, move, reward, next_state, done in batch:
-            current_q = self.q_table[state][move]
+        if self.mode == 'pure_rl':
+            # --- TRAIN NEURAL NET ---
+            # Prepare batch data
+            states = []
+            targets = []
             
-            if done:
-                target_q = reward
-            else:
-                next_q_values = self.q_table.get(next_state, {})
-                max_next_q = max(next_q_values.values()) if next_q_values else 0
-                target_q = reward + self.gamma * max_next_q
+            for state_tup, move, reward, next_state_tup, done in batch:
+                # Convert tuple state to array
+                state_arr = np.array(state_tup).flatten() / 9.0
+                states.append(state_arr)
+                
+                target = reward
+                if not done:
+                    next_arr = np.array(next_state_tup).flatten() / 9.0
+                    # Bootstrap with Brain
+                    target = reward + self.gamma * self.brain.forward(next_arr)[0][0]
+                targets.append([target])
             
-            self.q_table[state][move] += self.lr * (target_q - current_q)
-    
+            # Train batch
+            self.brain.train(np.array(states), np.array(targets), self.lr)
+            
+        else:
+            # --- TRAIN Q-TABLE (Hybrid) ---
+            for state, move, reward, next_state, done in batch:
+                current_q = self.q_table[state][move]
+                if done:
+                    target_q = reward
+                else:
+                    next_q_values = self.q_table.get(next_state, {})
+                    max_next_q = max(next_q_values.values()) if next_q_values else 0
+                    target_q = reward + self.gamma * max_next_q
+                
+                self.q_table[state][move] += self.lr * (target_q - current_q)
+
     def decay_epsilon(self):
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
     
@@ -672,10 +755,30 @@ def create_agent_zip(agent, config):
 
 st.sidebar.header("⚙️ Control Panel")
 
-with st.sidebar.expander("1. Agent Hyperparameters", expanded=True):
-    lr = st.slider("Learning Rate α", 0.1, 1.0, 0.3, 0.05)
+with st.sidebar.expander("1. Agent Architecture", expanded=True):
+    # MODE SELECTION
+    agent_mode = st.selectbox(
+        "🧠 Brain Architecture",
+        ['Hybrid Neuro-Symbolic', 'Pure RL (Deep Learning)'],
+        index=0,
+        help="Hybrid uses logic constraints. Pure RL uses a Neural Network."
+    )
+    
+    # Map selection to code
+    mode_key = 'hybrid' if 'Hybrid' in agent_mode else 'pure_rl'
+    
+    # Check if we need to reset agent due to mode change
+    if 'agent' in st.session_state and st.session_state.agent.mode != mode_key:
+        st.toast(f"Switched to {agent_mode}!", icon="🔄")
+        del st.session_state.agent
+        st.rerun()
+
+    lr = st.slider("Learning Rate α", 0.01, 1.0, 0.1 if mode_key == 'pure_rl' else 0.3, 0.01)
     gamma = st.slider("Discount Factor γ", 0.8, 0.99, 0.95, 0.01)
-    mcts_sims = st.slider("MCTS Simulations", 10, 500, 100, 10)
+    mcts_sims = st.slider("MCTS Simulations", 10, 500, 50 if mode_key == 'pure_rl' else 100, 10)
+    
+    if mode_key == 'pure_rl':
+        st.caption("ℹ️ *Pure RL uses a Neural Net, so MCTS sims can be lower but training takes longer to converge.*")
 
 with st.sidebar.expander("2. Training Configuration", expanded=True):
     episodes = st.number_input("Training Episodes", 10, 10000, 100, 10)
@@ -735,8 +838,9 @@ if st.sidebar.button("🧹 Reset Everything", use_container_width=True):
     st.rerun()
 
 # Initialize agent
+# Initialize agent if needed
 if 'agent' not in st.session_state or st.session_state.agent is None:
-    st.session_state.agent = AlphaZeroAgent(9, lr, gamma)
+    st.session_state.agent = AlphaZeroAgent(9, lr, gamma, mode=mode_key)
 
 agent = st.session_state.agent
 agent.mcts_simulations = mcts_sims
@@ -745,9 +849,14 @@ agent.mcts_simulations = mcts_sims
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("🧠 Neural Network", 
-             f"{len(getattr(agent, 'policy_table', {})) if agent else 0} states")
-    st.caption(f"ε={getattr(agent, 'epsilon', 0):.4f}")
+    if agent.mode == 'pure_rl':
+        loss_val = agent.brain.loss_history[-1] if agent.brain.loss_history else 0
+        st.metric("🧠 Neural Net Loss", f"{loss_val:.5f}")
+        st.caption("Deep Learning Active")
+    else:
+        st.metric("🧠 Policy States", f"{len(getattr(agent, 'policy_table', {}))}")
+        st.caption("Hybrid Logic Active")
+# ... (rest of cols are same)
 
 with col2:
     st.metric("♾️ DQN Q-Values", 
