@@ -767,18 +767,23 @@ with st.sidebar.expander("1. Agent Architecture", expanded=True):
     # Map selection to code
     mode_key = 'hybrid' if 'Hybrid' in agent_mode else 'pure_rl'
     
-    # Check if we need to reset agent due to mode change
-    if 'agent' in st.session_state and st.session_state.agent.mode != mode_key:
-        st.toast(f"Switched to {agent_mode}!", icon="🔄")
-        del st.session_state.agent
-        st.rerun()
+    # SAFE CHECK: Detect if agent is old (no mode) or different mode
+    if 'agent' in st.session_state:
+        # Use getattr to safely check mode without crashing on old agents
+        current_agent_mode = getattr(st.session_state.agent, 'mode', None)
+        
+        if current_agent_mode != mode_key:
+            st.toast(f"✨ Architecture updated to {agent_mode}!", icon="🔄")
+            # Delete old agent so it gets recreated with new class definition
+            del st.session_state.agent
+            st.rerun()
 
     lr = st.slider("Learning Rate α", 0.01, 1.0, 0.1 if mode_key == 'pure_rl' else 0.3, 0.01)
     gamma = st.slider("Discount Factor γ", 0.8, 0.99, 0.95, 0.01)
     mcts_sims = st.slider("MCTS Simulations", 10, 500, 50 if mode_key == 'pure_rl' else 100, 10)
     
     if mode_key == 'pure_rl':
-        st.caption("ℹ️ *Pure RL uses a Neural Net, so MCTS sims can be lower but training takes longer to converge.*")
+        st.caption("ℹ️ *Pure RL uses a Neural Net. Training is slower but smarter long-term.*")
 
 with st.sidebar.expander("2. Training Configuration", expanded=True):
     episodes = st.number_input("Training Episodes", 10, 10000, 100, 10)
